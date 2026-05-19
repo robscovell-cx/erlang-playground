@@ -1,8 +1,5 @@
-# Erlang
-*.beam
-erl_crash.dump
+# Build artifacts
+build/
 
-# C binaries (built by Make)
-counter_client
-counter_tests
-wc
+# Erlang crash dumps
+erl_crash.dump
