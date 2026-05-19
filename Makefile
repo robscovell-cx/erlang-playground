@@ -3,6 +3,8 @@ CFLAGS       = -Wall -Wextra
 ERLC         = erlc
 COUNTER_PORT = 9090
 BUILD        = build
+ERLDIR       = erlang
+CDIR         = c
 
 C_BINS = $(BUILD)/counter_client $(BUILD)/counter_tests $(BUILD)/wc
 BEAMS  = $(BUILD)/counter.beam $(BUILD)/counter_server.beam
@@ -14,16 +16,16 @@ all: $(BUILD) $(C_BINS) $(BEAMS)
 $(BUILD):
 	mkdir -p $(BUILD)
 
-$(BUILD)/counter_client: counter_client.c counter_proto.h | $(BUILD)
+$(BUILD)/counter_client: $(CDIR)/counter_client.c $(CDIR)/counter_proto.h | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $<
 
-$(BUILD)/counter_tests: counter_tests.c counter_proto.h | $(BUILD)
+$(BUILD)/counter_tests: $(CDIR)/counter_tests.c $(CDIR)/counter_proto.h | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $<
 
-$(BUILD)/wc: wc.c | $(BUILD)
+$(BUILD)/wc: $(CDIR)/wc.c | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $<
 
-$(BUILD)/%.beam: %.erl | $(BUILD)
+$(BUILD)/%.beam: $(ERLDIR)/%.erl | $(BUILD)
 	$(ERLC) -o $(BUILD) $<
 
 test: all
