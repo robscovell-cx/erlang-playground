@@ -3,3 +3,6 @@ build/
 
 # Erlang crash dumps
 erl_crash.dump
+
+# Mnesia on-disk schema (node-name varies)
+Mnesia.*/
