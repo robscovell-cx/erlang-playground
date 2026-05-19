@@ -1,0 +1,8 @@
+# Erlang
+*.beam
+erl_crash.dump
+
+# C binaries (built by Make)
+counter_client
+counter_tests
+wc
