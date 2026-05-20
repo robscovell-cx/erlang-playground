@@ -142,6 +142,24 @@
         <div id="auth-status" class="status"></div>
     </div>
 
+    <!-- Counter panel — shown when logged in -->
+    <div id="counter-panel" class="card" style="display:none;margin-bottom:16px">
+        <div class="label">Erlang Counter</div>
+        <div id="current-user" class="sublabel"></div>
+
+        <div id="counter-value" class="value">—</div>
+
+        <div class="controls">
+            <button class="btn-dec"   onclick="Module._decrement()">−</button>
+            <button class="btn-reset" onclick="Module._reset_counter()">Reset</button>
+            <button class="btn-inc"   onclick="Module._increment()">+</button>
+        </div>
+
+        <div id="status" class="status"></div>
+
+        <button class="btn-signout" onclick="authLogout()">Sign Out</button>
+    </div>
+
     <!-- Address panel — shown when logged in -->
     <div id="user_address-panel" class="card" style="display:none">
         <div class="label">Address</div>
