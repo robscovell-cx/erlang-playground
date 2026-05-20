@@ -6,6 +6,7 @@
 
 start() ->
     {ok, _} = counter:start_link(),
+    {ok, _} = auth:start_link(),
     {ok, LSock} = gen_tcp:listen(?HTTP_PORT, [
         binary, {active, false}, {reuseaddr, true}
     ]),
@@ -17,44 +18,91 @@ accept_loop(LSock) ->
     spawn(fun() -> handle_client(Sock) end),
     accept_loop(LSock).
 
-%% Switch to HTTP packet mode to let the runtime parse the request line,
-%% then drain remaining headers, then switch back to raw for sending.
 handle_client(Sock) ->
     inet:setopts(Sock, [{packet, http_bin}]),
     case gen_tcp:recv(Sock, 0, 5000) of
         {ok, {http_request, Method, {abs_path, Path}, _}} ->
-            skip_headers(Sock),
+            {ContentLength, Token} = collect_headers(Sock, 0, undefined),
             inet:setopts(Sock, [{packet, raw}]),
-            gen_tcp:send(Sock, route(Method, Path));
+            Body = read_body(Sock, ContentLength),
+            gen_tcp:send(Sock, route(Method, Path, Body, Token));
         _ ->
             ok
     end,
     gen_tcp:close(Sock).
 
-skip_headers(Sock) ->
+collect_headers(Sock, Len, Token) ->
     case gen_tcp:recv(Sock, 0, 5000) of
-        {ok, http_eoh} -> ok;
-        {ok, _}        -> skip_headers(Sock);
-        _              -> ok
+        {ok, http_eoh} ->
+            {Len, Token};
+        {ok, {http_header, _, 'Content-Length', _, Val}} ->
+            collect_headers(Sock, binary_to_integer(Val), Token);
+        {ok, {http_header, _, 'Authorization', _, Val}} ->
+            T = parse_bearer(Val),
+            collect_headers(Sock, Len, T);
+        {ok, _} ->
+            collect_headers(Sock, Len, Token);
+        _ ->
+            {Len, Token}
     end.
 
-%% CORS preflight — browsers send OPTIONS before cross-origin POSTs.
-route('OPTIONS', _) ->
+parse_bearer(<<"Bearer ", Token/binary>>) -> Token;
+parse_bearer(_)                           -> undefined.
+
+read_body(_Sock, 0)   -> <<>>;
+read_body(Sock, Len) ->
+    case gen_tcp:recv(Sock, Len, 5000) of
+        {ok, Data} -> Data;
+        _          -> <<>>
+    end.
+
+route('OPTIONS', _, _, _) ->
     response(200, "text/plain", <<>>);
-route('GET', <<"/">>) ->
+
+%% Auth routes — no session required
+route('POST', <<"/auth/register/begin">>,    Body, _Token) ->
+    {Code, Resp} = auth_http:handle_register_begin(Body),
+    response(Code, "application/json", Resp);
+route('POST', <<"/auth/register/complete">>, Body, _Token) ->
+    {Code, Resp} = auth_http:handle_register_complete(Body),
+    response(Code, "application/json", Resp);
+route('POST', <<"/auth/login/begin">>,       Body, _Token) ->
+    {Code, Resp} = auth_http:handle_login_begin(Body),
+    response(Code, "application/json", Resp);
+route('POST', <<"/auth/login/complete">>,    Body, _Token) ->
+    {Code, Resp} = auth_http:handle_login_complete(Body),
+    response(Code, "application/json", Resp);
+route('POST', <<"/auth/logout">>,            _Body, Token) ->
+    {Code, Resp} = auth_http:handle_logout(Token),
+    response(Code, "application/json", Resp);
+
+%% Counter routes — session required
+route(Method, <<"/value">> = Path, Body, Token)     -> session_guard(Method, Path, Body, Token);
+route(Method, <<"/increment">> = Path, Body, Token) -> session_guard(Method, Path, Body, Token);
+route(Method, <<"/decrement">> = Path, Body, Token) -> session_guard(Method, Path, Body, Token);
+route(Method, <<"/reset">> = Path, Body, Token)     -> session_guard(Method, Path, Body, Token);
+
+%% Static files — no session required (must come after all API routes)
+route('GET', <<"/">>, _, _) ->
     serve_file("index.html");
-route('GET', <<"/value">>) ->
-    respond_value();
-route('POST', <<"/increment">>) ->
-    counter:increment(), respond_value();
-route('POST', <<"/decrement">>) ->
-    counter:decrement(), respond_value();
-route('POST', <<"/reset">>) ->
-    counter:reset(), respond_value();
-route('GET', <<"/", File/binary>>) ->
+route('GET', <<"/", File/binary>>, _, _) ->
     serve_file(binary_to_list(File));
-route(_, _) ->
+
+route(_, _, _, _) ->
     response(404, "text/plain", <<"Not Found">>).
+
+session_guard(Method, Path, Body, Token) ->
+    case auth:validate_session(Token) of
+        {ok, _}    -> counter_route(Method, Path, Body);
+        {error, _} -> response(401, "application/json",
+                           json:encode(#{<<"error">> => <<"Unauthorized">>}))
+    end.
+
+counter_route('GET',  <<"/value">>,     _) -> respond_value();
+counter_route('POST', <<"/increment">>, _) -> counter:increment(), respond_value();
+counter_route('POST', <<"/decrement">>, _) -> counter:decrement(), respond_value();
+counter_route('POST', <<"/reset">>,     _) -> counter:reset(),     respond_value();
+counter_route(_, _, _)                     -> response(404, "text/plain", <<"Not Found">>).
 
 respond_value() ->
     response(200, "text/plain",
@@ -75,15 +123,21 @@ mime(_)       -> "application/octet-stream".
 cors_headers() ->
     "Access-Control-Allow-Origin: *\r\n"
     "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-    "Access-Control-Allow-Headers: Content-Type\r\n".
+    "Access-Control-Allow-Headers: Content-Type, Authorization\r\n".
 
 response(Code, ContentType, Body) ->
-    Len = byte_size(Body),
+    Bin = iolist_to_binary(Body),
+    Len = byte_size(Bin),
     [status_line(Code),
      "Content-Type: ", ContentType, "\r\n",
      cors_headers(),
      io_lib:format("Content-Length: ~w\r\n\r\n", [Len]),
-     Body].
+     Bin].
 
 status_line(200) -> "HTTP/1.1 200 OK\r\n";
-status_line(404) -> "HTTP/1.1 404 Not Found\r\n".
+status_line(201) -> "HTTP/1.1 201 Created\r\n";
+status_line(400) -> "HTTP/1.1 400 Bad Request\r\n";
+status_line(401) -> "HTTP/1.1 401 Unauthorized\r\n";
+status_line(404) -> "HTTP/1.1 404 Not Found\r\n";
+status_line(409) -> "HTTP/1.1 409 Conflict\r\n";
+status_line(500) -> "HTTP/1.1 500 Internal Server Error\r\n".

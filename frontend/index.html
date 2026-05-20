@@ -36,7 +36,7 @@
         .sublabel {
             font-size: 0.7rem;
             color: #484f58;
-            margin-bottom: 48px;
+            margin-bottom: 32px;
         }
 
         .value {
@@ -55,6 +55,19 @@
             gap: 10px;
             justify-content: center;
         }
+
+        input[type="text"] {
+            width: 100%;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            color: #c9d1d9;
+            font-size: 0.9rem;
+            padding: 10px 14px;
+            margin-bottom: 20px;
+            outline: none;
+        }
+        input[type="text"]:focus { border-color: #1f6feb; }
 
         button {
             border: none;
@@ -85,6 +98,25 @@
             height: 60px;
         }
 
+        .btn-primary {
+            background: #1f6feb;
+            color: #fff;
+            font-size: 0.85rem;
+            padding: 12px 20px;
+            flex: 1;
+        }
+
+        .btn-signout {
+            background: #21262d;
+            border: 1px solid #30363d;
+            color: #8b949e;
+            font-size: 0.7rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            padding: 8px 16px;
+            margin-top: 28px;
+        }
+
         .status {
             margin-top: 28px;
             font-size: 0.78rem;
@@ -94,9 +126,26 @@
     </style>
 </head>
 <body>
-    <div class="card">
+
+    <!-- Auth panel — shown until logged in -->
+    <div id="auth-panel" class="card" style="display:none">
+        <div class="label">Counter App</div>
+        <div class="sublabel">Sign in with a passkey</div>
+        <input id="username-input" type="text" placeholder="Username"
+               autocomplete="username webauthn" />
+        <div class="controls">
+            <button class="btn-primary"
+                    onclick="Module.ccall('auth_register',null,[],[])">Register Passkey</button>
+            <button class="btn-primary"
+                    onclick="Module.ccall('auth_login',null,[],[])">Sign In</button>
+        </div>
+        <div id="auth-status" class="status"></div>
+    </div>
+
+    <!-- Counter panel — shown when logged in -->
+    <div id="counter-panel" class="card" style="display:none">
         <div class="label">Erlang Counter</div>
-        <div class="sublabel">gen_server &rarr; HTTP &rarr; WebAssembly</div>
+        <div id="current-user" class="sublabel"></div>
 
         <div id="counter-value" class="value">—</div>
 
@@ -107,13 +156,31 @@
         </div>
 
         <div id="status" class="status"></div>
+
+        <button class="btn-signout"
+                onclick="Module.ccall('auth_logout',null,[],[])">Sign Out</button>
     </div>
 
     <script>
-        /* Set up the Module object before the Emscripten glue script loads so
-           onRuntimeInitialized fires once the WASM is ready. */
         var Module = {
-            onRuntimeInitialized: function () {
+            onRuntimeInitialized: function() {
+                if (Module.ccall('auth_is_logged_in', 'number', [], []) === 1) {
+                    Module.showCounterPanel('');
+                } else {
+                    document.getElementById('auth-panel').style.display = 'block';
+                }
+            },
+            showAuthPanel: function() {
+                document.getElementById('counter-panel').style.display = 'none';
+                document.getElementById('auth-panel').style.display   = 'block';
+                document.getElementById('auth-status').textContent    = '';
+            },
+            showCounterPanel: function(username) {
+                document.getElementById('auth-panel').style.display    = 'none';
+                document.getElementById('counter-panel').style.display = 'block';
+                if (username) {
+                    document.getElementById('current-user').textContent = username;
+                }
                 Module.ccall('refresh', null, [], []);
             }
         };
