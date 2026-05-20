@@ -1,9 +1,9 @@
 -module(counter).
 -behaviour(gen_server).
 
--record(counter, {key = default, value = 0}).
+-record(counter, {key, value = 0}).
 
--export([start_link/0, increment/0, decrement/0, reset/0, value/0]).
+-export([start_link/0, increment/1, decrement/1, reset/1, value/1]).
 -export([init/1, handle_call/3, handle_cast/2, terminate/2]).
 
 %% Public API
@@ -11,28 +11,28 @@
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-increment() -> gen_server:cast(?MODULE, {update, +1}).
-decrement() -> gen_server:cast(?MODULE, {update, -1}).
-reset()     -> gen_server:cast(?MODULE, reset).
-value()     -> gen_server:call(?MODULE, value).
+increment(User) -> gen_server:cast(?MODULE, {update, User, +1}).
+decrement(User) -> gen_server:cast(?MODULE, {update, User, -1}).
+reset(User)     -> gen_server:cast(?MODULE, {reset,  User}).
+value(User)     -> gen_server:call(?MODULE, {value,  User}).
 
 %% Callbacks
 
 init([]) ->
     ok = ensure_mnesia(),
-    {ok, ok}.  %% state is a placeholder; the counter lives in Mnesia
+    {ok, ok}.
 
-handle_call(value, _From, State) ->
-    {reply, read_value(), State}.
+handle_call({value, User}, _From, State) ->
+    {reply, read_value(User), State}.
 
-handle_cast({update, Delta}, State) ->
+handle_cast({update, User, Delta}, State) ->
     {atomic, _} = mnesia:transaction(fun() ->
-        mnesia:write(#counter{value = read_value_txn() + Delta})
+        mnesia:write(#counter{key = User, value = read_value_txn(User) + Delta})
     end),
     {noreply, State};
-handle_cast(reset, State) ->
+handle_cast({reset, User}, State) ->
     {atomic, _} = mnesia:transaction(fun() ->
-        mnesia:write(#counter{})  %% default value = 0
+        mnesia:write(#counter{key = User, value = 0})
     end),
     {noreply, State}.
 
@@ -46,8 +46,8 @@ ensure_mnesia() ->
         {error, {_, {already_exists, _}}} -> ok
     end,
     case mnesia:start() of
-        ok                                       -> ok;
-        {error, {already_started, mnesia}}       -> ok
+        ok                                 -> ok;
+        {error, {already_started, mnesia}} -> ok
     end,
     case mnesia:create_table(counter, [
         {attributes, record_info(fields, counter)},
@@ -58,13 +58,12 @@ ensure_mnesia() ->
     end,
     mnesia:wait_for_tables([counter], 5000).
 
-read_value() ->
-    {atomic, V} = mnesia:transaction(fun() -> read_value_txn() end),
+read_value(User) ->
+    {atomic, V} = mnesia:transaction(fun() -> read_value_txn(User) end),
     V.
 
-%% Must be called inside a transaction.
-read_value_txn() ->
-    case mnesia:read(counter, default) of
+read_value_txn(User) ->
+    case mnesia:read(counter, User) of
         []                    -> 0;
         [#counter{value = V}] -> V
     end.

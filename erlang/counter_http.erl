@@ -93,20 +93,20 @@ route(_, _, _, _) ->
 
 session_guard(Method, Path, Body, Token) ->
     case auth:validate_session(Token) of
-        {ok, _}    -> counter_route(Method, Path, Body);
+        {ok, User} -> counter_route(Method, Path, Body, User);
         {error, _} -> response(401, "application/json",
                            json:encode(#{<<"error">> => <<"Unauthorized">>}))
     end.
 
-counter_route('GET',  <<"/value">>,     _) -> respond_value();
-counter_route('POST', <<"/increment">>, _) -> counter:increment(), respond_value();
-counter_route('POST', <<"/decrement">>, _) -> counter:decrement(), respond_value();
-counter_route('POST', <<"/reset">>,     _) -> counter:reset(),     respond_value();
-counter_route(_, _, _)                     -> response(404, "text/plain", <<"Not Found">>).
+counter_route('GET',  <<"/value">>,     _, U) -> respond_value(U);
+counter_route('POST', <<"/increment">>, _, U) -> counter:increment(U), respond_value(U);
+counter_route('POST', <<"/decrement">>, _, U) -> counter:decrement(U), respond_value(U);
+counter_route('POST', <<"/reset">>,     _, U) -> counter:reset(U),     respond_value(U);
+counter_route(_, _, _, _)                     -> response(404, "text/plain", <<"Not Found">>).
 
-respond_value() ->
+respond_value(User) ->
     response(200, "text/plain",
-             list_to_binary(integer_to_list(counter:value()))).
+             list_to_binary(integer_to_list(counter:value(User)))).
 
 serve_file(File) ->
     Path = ?FRONTEND_DIR ++ "/" ++ File,

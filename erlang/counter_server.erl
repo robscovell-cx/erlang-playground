@@ -25,19 +25,19 @@ accept_loop(LSock) ->
 client_loop(Sock) ->
     case gen_tcp:recv(Sock, 0) of
         {ok, <<"increment\n">>} ->
-            counter:increment(),
+            counter:increment(default),
             gen_tcp:send(Sock, "ok\n"),
             client_loop(Sock);
         {ok, <<"decrement\n">>} ->
-            counter:decrement(),
+            counter:decrement(default),
             gen_tcp:send(Sock, "ok\n"),
             client_loop(Sock);
         {ok, <<"reset\n">>} ->
-            counter:reset(),
+            counter:reset(default),
             gen_tcp:send(Sock, "ok\n"),
             client_loop(Sock);
         {ok, <<"value\n">>} ->
-            V = counter:value(),
+            V = counter:value(default),
             gen_tcp:send(Sock, [integer_to_list(V), "\n"]),
             client_loop(Sock);
         {ok, _} ->
