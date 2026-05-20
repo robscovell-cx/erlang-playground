@@ -3,60 +3,169 @@
 # Regenerate by invoking the code-map skill.
 
 version: 1
-generated: "2026-05-19T00:00:00Z"
+generated: "2026-05-20T00:00:00Z"
 
 overview:
   name: "erlang-playground"
-  purpose: "Erlang/OTP gen_server counter with C clients, WASM frontend, and Mnesia persistence"
+  purpose: "Per-user Erlang/OTP counter with passkey (WebAuthn) authentication, C clients, and WASM frontend"
   tech:
     - "Erlang/OTP 28"
-    - "C (POSIX sockets)"
-    - "WebAssembly (Emscripten)"
-  architecture: "Browser/C clients → HTTP or TCP server → counter gen_server → Mnesia disc_copies"
+    - "C (POSIX sockets, Emscripten WASM)"
+    - "WebAuthn / FIDO2 (passkeys)"
+    - "WebAssembly (Emscripten 5.0.7)"
+  architecture: "Browser (WASM) → HTTP server → auth gen_server + counter gen_server → Mnesia disc_copies"
 
 directories:
-  "erlang/": "Erlang/OTP source — gen_server, TCP server, HTTP server, escript"
-  "c/":      "C source — TCP client, WASM module, test suite, shared protocol header, wc tool"
-  "frontend/": "HTML shell for the WASM frontend (source; built output goes to build/frontend/)"
+  "erlang/": "Erlang/OTP source — gen_servers, HTTP/TCP servers, WebAuthn verification, escript"
+  "c/":      "C source — TCP client, WASM modules (counter + auth), test suite, shared protocol header, wc tool"
+  "frontend/": "HTML shell for WASM frontend (source; built output goes to build/frontend/)"
   "build/":    "All compiled artifacts — .beam files, C binaries, WASM JS/wasm (gitignored)"
 
 services:
   - name: counter
     path: "erlang/counter.erl"
-    purpose: "gen_server wrapping a Mnesia-backed integer counter; survives restarts"
+    purpose: "gen_server wrapping per-user Mnesia-backed integer counters; survives restarts"
     api:
       - "start_link/0 → register as {local, counter}"
-      - "increment/0  → cast {update, +1}"
-      - "decrement/0  → cast {update, -1}"
-      - "reset/0      → cast reset (writes 0 to Mnesia)"
-      - "value/0      → call; reads current value from Mnesia transaction"
-    state: "ok (placeholder — real state is in Mnesia table 'counter')"
+      - "increment/1(User) → cast {update, User, +1}"
+      - "decrement/1(User) → cast {update, User, -1}"
+      - "reset/1(User)     → cast {reset, User} (writes 0 to Mnesia)"
+      - "value/1(User)     → call {value, User}; reads from Mnesia transaction"
+    state: "ok (placeholder — real state is Mnesia table 'counter')"
+    mnesia:
+      table: counter
+      key: "User (any term — username binary or atom 'default')"
+      fields: [key, value]
+      storage: disc_copies
+
+  - name: auth
+    path: "erlang/auth.erl"
+    purpose: "gen_server owning four WebAuthn Mnesia tables; API functions use dirty ops directly"
+    api:
+      - "start_link/0"
+      - "create_challenge/2(Username, Kind) → {ok, ChallengeB64}"
+      - "consume_challenge/2(ChallengeB64, Kind) → {ok, Username} | {error, not_found|expired}"
+      - "register_credential/4(Username, CredId, PubKey, SignCount) → ok"
+      - "find_credential/1(CredIdRaw) → {ok, Map} | {error, not_found}"
+      - "credentials_for_user/1(Username) → [Map]"
+      - "update_sign_count/2(CredId, NewCount) → ok"
+      - "create_session/1(Username) → {ok, Token}"
+      - "validate_session/1(Token) → {ok, Username} | {error, invalid|expired}"
+      - "delete_session/1(Token) → ok"
+      - "user_exists/1(Username) → boolean()"
+    state: "ok (placeholder — real state is Mnesia tables)"
+    mnesia:
+      tables:
+        - name: webauthn_user
+          key: username
+          fields: [username, created_at]
+          storage: disc_copies
+        - name: webauthn_credential
+          key: credential_id
+          fields: [credential_id, username, public_key, sign_count, created_at]
+          index: [username]
+          storage: disc_copies
+        - name: webauthn_challenge
+          key: challenge (raw bytes)
+          fields: [challenge, username, kind, created_at]
+          ttl: 300s
+          storage: disc_copies
+        - name: webauthn_session
+          key: token
+          fields: [token, username, expires_at]
+          ttl: 3600s
+          storage: disc_copies
+    background: "hourly purge of expired sessions via send_after + handle_info"
 
   - name: counter_server
     path: "erlang/counter_server.erl"
-    purpose: "Raw TCP server (port 9090); line-protocol bridge to counter gen_server"
-    protocol: "Client sends newline-terminated command; server replies with value or 'ok'"
-    commands: ["increment", "decrement", "reset", "value"]
+    purpose: "Raw TCP server (port 9090); line-protocol bridge to counter gen_server; uses 'default' user key"
+    protocol: "Newline-terminated command; replies with value or 'ok'"
+    commands: [increment, decrement, reset, value]
 
   - name: counter_http
     path: "erlang/counter_http.erl"
-    purpose: "HTTP/1.1 server (port 8080); serves counter API and static frontend files"
+    purpose: "HTTP/1.1 server (port 8080); starts counter + auth gen_servers; serves counter API and static frontend"
     endpoints:
-      - "OPTIONS /*          → CORS preflight"
-      - "GET  /              → serve build/frontend/index.html"
-      - "GET  /value         → return counter value as plain text"
-      - "POST /increment     → increment then return new value"
-      - "POST /decrement     → decrement then return new value"
-      - "POST /reset         → reset to 0 then return new value"
-      - "GET  /<file>        → serve static file from build/frontend/"
-    notes: "Uses {packet, http_bin} for request parsing; spawns one process per connection"
+      - "OPTIONS /*                    → CORS preflight"
+      - "POST /auth/register/begin     → issue registration challenge (unauthenticated)"
+      - "POST /auth/register/complete  → verify attestation, store credential (unauthenticated)"
+      - "POST /auth/login/begin        → issue assertion challenge (unauthenticated)"
+      - "POST /auth/login/complete     → verify assertion, create session, return Bearer token"
+      - "POST /auth/logout             → delete session"
+      - "GET  /                        → serve build/frontend/index.html"
+      - "GET  /<file>                  → serve static file from build/frontend/"
+      - "GET  /value                   → return caller's counter value (session required)"
+      - "POST /increment               → increment caller's counter (session required)"
+      - "POST /decrement               → decrement caller's counter (session required)"
+      - "POST /reset                   → reset caller's counter to 0 (session required)"
+    auth: "Bearer token in Authorization header; validate_session extracts Username for counter key"
+    notes: "Uses {packet, http_bin} for request parsing; collect_headers/2 accumulates Content-Length and Authorization"
+
+  - name: auth_http
+    path: "erlang/auth_http.erl"
+    purpose: "Route handler functions called from counter_http; each returns {HttpCode, JsonBody}"
+    handlers:
+      - "handle_register_begin/1(Body)    → check user non-existence, create challenge, return {200, JSON}"
+      - "handle_register_complete/1(Body) → consume challenge, verify_registration, register_credential → {201, JSON}"
+      - "handle_login_begin/1(Body)       → get credentials, create challenge, return allowCredentials → {200, JSON}"
+      - "handle_login_complete/1(Body)    → consume challenge, find_credential, verify_assertion, create_session → {200, JSON}"
+      - "handle_logout/1(Token)           → delete_session → {200, JSON}"
+
+  - name: webauthn
+    path: "erlang/webauthn.erl"
+    purpose: "Pure-Erlang WebAuthn registration and assertion verification; no third-party deps"
+    api:
+      - "verify_registration/4(Username, ChallengeB64, AttObjB64, ClientDataB64) → {ok, Map} | {error, Reason}"
+      - "verify_assertion/5(ChallengeB64, AuthDataB64, ClientDataB64, SigB64, StoredCred) → {ok, SignCount} | {error, Reason}"
+    checks:
+      - "clientDataJSON: type, origin (http://localhost:8080), challenge match"
+      - "authData: rpIdHash (sha256 of 'localhost'), UP flag, AT flag (registration)"
+      - "COSE key: EC2, P-256 (keys -2/-3 = X/Y coords, 32 bytes each)"
+      - "public key: uncompressed 65-byte EC point (04 || X || Y)"
+      - "signature: crypto:verify(ecdsa, sha256, SignedData, Sig, [PubKey, prime256v1])"
+      - "attestation formats: 'none' (skip), 'packed' (self-attest, verify sig)"
+      - "sign count: 0 always ok (platform auth); new > stored ok; otherwise replay error"
+
+  - name: webauthn_cbor
+    path: "erlang/webauthn_cbor.erl"
+    purpose: "Pure recursive-descent CBOR decoder for WebAuthn attestationObject and COSE keys"
+    api:
+      - "decode/1(Binary) → {ok, Value} | {error, cbor_decode_failed}"
+    types: "uint(0), nint(1), bstr(2), tstr→binary(3), array(4), map(5)"
+    notes: "Map keys decoded as-is (integers for COSE_Key, binaries for attestationObject)"
 
 models:
   - name: counter (Mnesia record)
     path: "erlang/counter.erl"
     type: entity
-    key_props: ["key (atom, always 'default')", "value (integer, default 0)"]
-    storage: "disc_copies on local node"
+    key_props: ["key (username binary or atom 'default')", "value (integer, default 0)"]
+    storage: disc_copies
+
+  - name: webauthn_user (Mnesia record)
+    path: "erlang/auth.erl"
+    type: entity
+    key_props: ["username (binary)", "created_at (unix seconds)"]
+    storage: disc_copies
+
+  - name: webauthn_credential (Mnesia record)
+    path: "erlang/auth.erl"
+    type: entity
+    key_props: ["credential_id (raw bytes)", "username (binary)", "public_key (65-byte EC point)", "sign_count (integer)"]
+    storage: disc_copies
+    notes: "secondary index on username field"
+
+  - name: webauthn_challenge (Mnesia record)
+    path: "erlang/auth.erl"
+    type: entity
+    key_props: ["challenge (32 raw bytes)", "username (binary)", "kind (atom: registration|authentication)", "created_at"]
+    storage: disc_copies
+
+  - name: webauthn_session (Mnesia record)
+    path: "erlang/auth.erl"
+    type: entity
+    key_props: ["token (base64url binary)", "username (binary)", "expires_at (unix seconds)"]
+    storage: disc_copies
 
 clients:
   - name: counter_client
@@ -70,8 +179,21 @@ clients:
 
   - name: counter_wasm
     path: "c/counter_wasm.c"
-    purpose: "Emscripten WASM module; uses emscripten_fetch to call counter_http API; updates DOM via EM_ASM"
+    purpose: "Emscripten WASM module; emscripten_fetch to counter_http API; sends Bearer token; handles 401"
     exports: ["increment()", "decrement()", "reset_counter()", "refresh()"]
+    auth: "reads extern g_session_token[128] from auth_wasm.c; sets Authorization: Bearer header"
+    notes: "on_success checks fetch->status == 401 → clears token, calls Module.showAuthPanel()"
+
+  - name: auth_wasm
+    path: "c/auth_wasm.c"
+    purpose: "Emscripten WASM module; EM_ASYNC_JS flows for passkey register/login/logout via navigator.credentials"
+    globals: ["g_session_token[128]", "g_username[256]"]
+    exports: ["auth_register()", "auth_login()", "auth_logout()", "auth_is_logged_in()"]
+    flows:
+      - "register: fetch /auth/register/begin → navigator.credentials.create → fetch /auth/register/complete → showCounterPanel"
+      - "login:    fetch /auth/login/begin → navigator.credentials.get → fetch /auth/login/complete → store token → showCounterPanel"
+      - "logout:   POST /auth/logout → clear globals → showAuthPanel"
+    notes: "EM_ASYNC_JS JS bodies must not use C preprocessor macros (# stringifies without expanding); avoid /\\// regex (triggers C // comment); use /[+]/ not /\\+/ (# strips backslash)"
 
   - name: wc
     path: "c/wc.c"
@@ -87,51 +209,85 @@ shared:
     purpose: "Shared C header — counter_connect() and counter_transact() used by client and tests"
 
 relationships:
-  - from: "Browser"
+  - from: "Browser (WASM)"
     to: "counter_http"
     type: calls
-    note: "HTTP fetch from WASM module (port 8080)"
+    note: "HTTP fetch with Authorization: Bearer <token> (port 8080)"
+  - from: "auth_wasm"
+    to: "counter_http"
+    type: calls
+    note: "navigator.credentials + fetch to /auth/* endpoints (unauthenticated)"
   - from: "counter_wasm"
     to: "counter_http"
     type: calls
-    note: "emscripten_fetch POST/GET to API endpoints"
+    note: "emscripten_fetch POST/GET to /increment /decrement /reset /value with Bearer token"
+  - from: "counter_http"
+    to: "auth_http"
+    type: calls
+    note: "delegates /auth/* routes; wraps result in HTTP response"
+  - from: "counter_http"
+    to: "auth"
+    type: calls
+    note: "validate_session(Token) → {ok, Username} to guard counter routes"
+  - from: "counter_http"
+    to: "counter"
+    type: calls
+    note: "increment/decrement/reset/value with Username from validated session"
+  - from: "auth_http"
+    to: "auth"
+    type: calls
+    note: "create/consume challenges, register credentials, create/delete sessions"
+  - from: "auth_http"
+    to: "webauthn"
+    type: calls
+    note: "verify_registration and verify_assertion"
+  - from: "webauthn"
+    to: "webauthn_cbor"
+    type: calls
+    note: "decode attestationObject and COSE key bytes"
   - from: "counter_client"
     to: "counter_server"
     type: calls
-    note: "TCP line protocol (port 9090)"
+    note: "TCP line protocol (port 9090) via counter_proto.h"
   - from: "counter_tests"
     to: "counter_server"
     type: calls
     note: "TCP line protocol (port 9090) via counter_proto.h"
-  - from: "counter_http"
-    to: "counter"
-    type: calls
-    note: "Erlang function calls to gen_server API"
   - from: "counter_server"
     to: "counter"
     type: calls
-    note: "Erlang function calls to gen_server API"
+    note: "increment/decrement/reset/value with key=default (bypasses auth)"
   - from: "counter"
     to: "Mnesia"
     type: manages
     note: "disc_copies table; read/write via mnesia:transaction"
+  - from: "auth"
+    to: "Mnesia"
+    type: manages
+    note: "four disc_copies tables; read/write via mnesia:dirty_* ops"
 
 build:
   tool: "make"
   targets:
-    - "all   → compile C binaries and .beam files"
-    - "wasm  → compile counter_wasm.c with emcc; copy index.html to build/frontend/"
-    - "serve → all + wasm + start counter_http on port 8080"
-    - "test  → all + start counter_server + run counter_tests + kill server"
+    - "all   → compile C binaries and .beam files (7 beams)"
+    - "wasm  → emcc counter_wasm.c auth_wasm.c → build/frontend/counter.js + copy index.html"
+    - "serve → all + wasm + kill :8080 + start counter_http on port 8080"
+    - "test  → all + start counter_server + run counter_tests (TCP, no auth) + kill server"
     - "clean → rm -rf build/ erl_crash.dump"
+  emflags: "-O2 -sFETCH -sASYNCIFY"
   artifacts: "build/ (gitignored)"
   mnesia_data: "Mnesia.nonode@nohost/ in working dir (gitignored)"
 
 conventions:
-  - "gen_server state is a placeholder (ok) when real state lives in an external store"
-  - "All Erlang endpoints return the current counter value after mutation (no separate GET needed)"
-  - "C client/tests share socket logic via a shared header (counter_proto.h) not a library"
-  - "TCP server spawns one Erlang process per accepted connection"
-  - "HTTP server uses {packet, http_bin} for parsing then switches back to raw for response"
-  - "Emscripten WASM exports via EMSCRIPTEN_KEEPALIVE; JS calls via Module.ccall"
-  - "make test clears the port before starting to ensure a clean server each run"
+  - "gen_server state is a placeholder (ok) when real state lives in Mnesia"
+  - "auth gen_server API functions use mnesia:dirty_* directly — gen_server only needed for table init and hourly purge timer"
+  - "counter Mnesia key is the username binary for HTTP clients; atom 'default' for TCP server"
+  - "HTTP Bearer token extracted from Authorization header by collect_headers/2 during header drain"
+  - "auth routes (/auth/*) are unauthenticated; all counter routes require validate_session"
+  - "session_guard/4 in counter_http extracts Username from {ok, Username} and passes to counter_route/4"
+  - "TCP server (port 9090) bypasses auth entirely — intended as internal/dev tool only"
+  - "EM_ASYNC_JS JS bodies: no C preprocessor macros (not expanded by #); no /\\// regex; use /[+]/ for literal +"
+  - "b64url helpers inlined in each EM_ASYNC_JS body (cannot share between EM_ASYNC_JS scopes)"
+  - "C client/tests share socket logic via counter_proto.h (shared header, not a library)"
+  - "HTTP server uses {packet, http_bin} for parsing then switches to raw for response"
+  - "make test clears port 9090 before starting to ensure a clean server each run"
