@@ -3,7 +3,7 @@
 # Regenerate by invoking the code-map skill.
 
 version: 1
-generated: "2026-05-20T12:00:00Z"
+generated: "2026-05-20T14:00:00Z"
 
 overview:
   name: "erlang-playground"
@@ -14,11 +14,11 @@ overview:
     - "JavaScript (auth ceremonies — plain JS, no WASM)"
     - "WebAuthn / FIDO2 (passkeys)"
     - "WebAssembly (Emscripten 5.0.7)"
-  architecture: "Browser (WASM) → HTTP server → auth gen_server + counter gen_server → Mnesia disc_copies"
+  architecture: "Browser (WASM + auth.js) → HTTP server → auth gen_server + counter gen_server → Mnesia disc_copies"
 
 directories:
-  "erlang/": "Erlang/OTP source — gen_servers, HTTP/TCP servers, WebAuthn verification, escript"
-  "c/":      "C source — TCP client, WASM counter module, test suite, shared protocol header, wc tool"
+  "erlang/": "Erlang/OTP source — gen_servers, HTTP/TCP servers, WebAuthn verification"
+  "c/":      "C source — TCP client, WASM counter module, test suite, shared protocol header"
   "frontend/": "HTML shell + auth.js for WASM frontend (source; built output goes to build/frontend/)"
   "build/":    "All compiled artifacts — .beam files, C binaries, WASM JS/wasm (gitignored)"
 
@@ -87,8 +87,8 @@ services:
   - name: counter_http
     path: "erlang/counter_http.erl"
     purpose: "HTTP/1.1 server (port 8080); starts counter + auth gen_servers; serves counter API and static frontend"
-    auth: "Bearer token in Authorization header; validate_session extracts Username for counter key"
-    notes: "Uses {packet, http_bin} for request parsing; collect_headers/2 accumulates Content-Length and Authorization"
+    auth: "Session token in HttpOnly 'session' cookie; collect_headers/2 extracts it via parse_session_cookie/1; validate_session extracts Username for counter key"
+    notes: "Uses {packet, http_bin} for request parsing; collect_headers/2 accumulates Content-Length and Cookie; response/4 supports extra response headers (used for Set-Cookie)"
     endpoints:
       - method: OPTIONS
         path: "/*"
@@ -109,26 +109,33 @@ services:
         response: "200 with inferred MIME type | 404"
 
       - method: GET
+        path: "/auth/me"
+        auth: "session cookie"
+        body: none
+        response: "200 application/json {\"username\":\"<username>\"} | 401 {\"error\":\"Unauthorized\"}"
+        notes: "lightweight session check used by frontend on page load to restore login state"
+
+      - method: GET
         path: "/value"
-        auth: "Bearer <token>"
+        auth: "session cookie"
         body: none
         response: "200 text/plain — current counter value as integer string | 401"
 
       - method: POST
         path: "/increment"
-        auth: "Bearer <token>"
+        auth: "session cookie"
         body: none
         response: "200 text/plain — new counter value as integer string | 401"
 
       - method: POST
         path: "/decrement"
-        auth: "Bearer <token>"
+        auth: "session cookie"
         body: none
         response: "200 text/plain — new counter value as integer string | 401"
 
       - method: POST
         path: "/reset"
-        auth: "Bearer <token>"
+        auth: "session cookie"
         body: none
         response: "200 text/plain — \"0\" | 401"
 
@@ -142,6 +149,7 @@ services:
         response_ok: |
           200 application/json
           { "challenge": "<base64url 32-byte random>",
+            "userId":    "<base64url 16-byte random — NOT the username; avoids PII on authenticator>",
             "rpId":      "localhost",
             "rpName":    "Counter App" }
         response_err: "409 {\"error\":\"user_exists\"} | 400 {\"error\":\"bad_request\"}"
@@ -158,11 +166,10 @@ services:
             clientDataJSON:    "base64url string — JSON blob from navigator.credentials.create"
         response_ok: |
           201 application/json
-          { "status":   "ok",
-            "token":    "<base64url 32-byte session token>",
-            "username": "<username>" }
-        response_err: "400 {\"error\":\"<reason>\"} — expired | not_found | bad_type | bad_origin | challenge_mismatch | bad_rp_id | user_presence_required | invalid_attestation_signature | unsupported_cose_key | ..."
-        notes: "creates a session immediately so the user is logged in without a separate login step"
+          Set-Cookie: session=<token>; HttpOnly; SameSite=Strict; Path=/
+          { "status": "ok", "username": "<username>" }
+        response_err: "400 {\"error\":\"<reason>\"} — expired | not_found | bad_type | bad_origin | challenge_mismatch | bad_rp_id | user_presence_required | ..."
+        notes: "session token delivered as HttpOnly cookie, not in body; user is logged in immediately after registering"
 
       - method: POST
         path: "/auth/login/begin"
@@ -190,29 +197,34 @@ services:
             signature:         "base64url string — signature from assertion.response"
         response_ok: |
           200 application/json
-          { "token":    "<base64url 32-byte session token>",
-            "username": "<username>" }
+          Set-Cookie: session=<token>; HttpOnly; SameSite=Strict; Path=/
+          { "username": "<username>" }
         response_err: "401 {\"error\":\"<reason>\"} — not_found | expired | credential_not_found | invalid_signature | sign_count_replay | ... | 400 {\"error\":\"bad_request\"}"
+        notes: "session token delivered as HttpOnly cookie, not in body"
 
       - method: POST
         path: "/auth/logout"
-        auth: "Bearer <token> (token extracted from Authorization header, not body)"
+        auth: "session cookie (token read from Cookie header, not body)"
         body:
           content_type: application/json
           fields: {}
-          note: "body is ignored; session identified entirely by the Bearer token"
-        response_ok: "200 application/json {\"status\":\"ok\"}"
+          note: "body is ignored; session identified by the HttpOnly cookie"
+        response_ok: |
+          200 application/json
+          Set-Cookie: session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0
+          { "status": "ok" }
         response_err: "always 200 (delete_session is idempotent)"
 
   - name: auth_http
     path: "erlang/auth_http.erl"
-    purpose: "Route handler functions called from counter_http; each returns {HttpCode, JsonBody}"
+    purpose: "Route handler functions called from counter_http; each returns {HttpCode, ExtraHeaders, JsonBody}"
+    notes: "ExtraHeaders is [] or [{<<\"Set-Cookie\">>, Value}]; set_cookie/1 and clear_cookie/0 build the header values"
     handlers:
-      - "handle_register_begin/1(Body)    → check user non-existence, create challenge, return {200, JSON}"
-      - "handle_register_complete/1(Body) → consume challenge, verify_registration, register_credential, create_session → {201, JSON with token}"
-      - "handle_login_begin/1(Body)       → get credentials, create challenge, return allowCredentials → {200, JSON}"
-      - "handle_login_complete/1(Body)    → consume challenge, find_credential, verify_assertion, create_session → {200, JSON}"
-      - "handle_logout/1(Token)           → delete_session → {200, JSON}"
+      - "handle_register_begin/1(Body)    → check user non-existence, generate random userId, create challenge → {200, [], JSON}"
+      - "handle_register_complete/1(Body) → consume challenge, verify_registration, register_credential, create_session → {201, [set_cookie(Token)], JSON}"
+      - "handle_login_begin/1(Body)       → get credentials, create challenge → {200, [], JSON}"
+      - "handle_login_complete/1(Body)    → consume challenge, find_credential, verify_assertion, update_sign_count, create_session → {200, [set_cookie(Token)], JSON}"
+      - "handle_logout/1(Token)           → delete_session → {200, [clear_cookie()], JSON}"
 
   - name: webauthn
     path: "erlang/webauthn.erl"
@@ -221,13 +233,13 @@ services:
       - "verify_registration/4(Username, ChallengeB64, AttObjB64, ClientDataB64) → {ok, Map} | {error, Reason}"
       - "verify_assertion/5(ChallengeB64, AuthDataB64, ClientDataB64, SigB64, StoredCred) → {ok, SignCount} | {error, Reason}"
     checks:
-      - "clientDataJSON: type, origin (http://localhost:8080), challenge match"
+      - "clientDataJSON: type, origin (http://localhost:8080), challenge match (bytes comparison)"
       - "authData: rpIdHash (sha256 of 'localhost'), UP flag, AT flag (registration)"
       - "COSE key: EC2, P-256 (keys -2/-3 = X/Y coords, 32 bytes each)"
       - "public key: uncompressed 65-byte EC point (04 || X || Y)"
       - "signature: crypto:verify(ecdsa, sha256, SignedData, Sig, [PubKey, prime256v1])"
       - "attestation formats: 'none' (skip), 'packed' (self-attest, verify sig)"
-      - "sign count: 0 always ok (platform auth); new > stored ok; otherwise replay error"
+      - "sign count: 0 always ok (platform auth); new > stored ok; otherwise sign_count_replay error"
 
   - name: webauthn_cbor
     path: "erlang/webauthn_cbor.erl"
@@ -281,29 +293,26 @@ clients:
 
   - name: counter_wasm
     path: "c/counter_wasm.c"
-    purpose: "Emscripten WASM module; emscripten_fetch to counter_http API; sends Bearer token; handles 401"
+    purpose: "Emscripten WASM module; emscripten_fetch to counter_http API; handles 401"
     exports: ["increment()", "decrement()", "reset_counter()", "refresh()"]
-    auth: "reads session token from window.__sessionToken via EM_JS bridge (js_copy_session_token); sets Authorization: Bearer header"
-    notes: "on_success checks fetch->status == 401 → clears window.__sessionToken, calls Module.showAuthPanel()"
+    auth: "no auth header; browser sends HttpOnly session cookie automatically for same-origin requests"
+    notes: "on_success checks fetch->status == 401 → calls Module.showAuthPanel(); no EM_JS bridge or Authorization header logic"
 
   - name: auth.js
     path: "frontend/auth.js"
-    purpose: "Plain JS WebAuthn auth — register, login, logout; no WASM"
-    token_storage: "window.__sessionToken (read by counter_wasm.c via EM_JS; reset on page load)"
-    exports: ["authRegister()", "authLogin()", "authLogout()", "authIsLoggedIn()"]
+    purpose: "Plain JS WebAuthn auth — register, login, logout, session check; no WASM"
+    token_storage: "HttpOnly cookie set by server; JavaScript cannot read it; no window.__sessionToken"
+    exports: ["authRegister()", "authLogin()", "authLogout()", "authCheckSession()", "_webauthn_available()"]
     flows:
-      - "register: POST /auth/register/begin → navigator.credentials.create → POST /auth/register/complete → store token → showCounterPanel"
-      - "login:    POST /auth/login/begin → navigator.credentials.get → POST /auth/login/complete → store token → showCounterPanel"
-      - "logout:   clear token → POST /auth/logout → showAuthPanel"
-    notes: "auth is plain JS (not WASM) because the ceremonies are entirely fetch + navigator.credentials; no C-idiomatic work"
-
-  - name: wc
-    path: "c/wc.c"
-    purpose: "Standalone wc-like tool counting lines/words/bytes per file with totals"
-
-  - name: wc.escript
-    path: "erlang/wc.escript"
-    purpose: "Equivalent wc tool implemented as an Erlang escript"
+      - "register: POST /auth/register/begin → navigator.credentials.create (uses opts.userId, not username) → POST /auth/register/complete → server sets session cookie → showCounterPanel"
+      - "login:    POST /auth/login/begin → navigator.credentials.get → POST /auth/login/complete → server sets session cookie → showCounterPanel"
+      - "logout:   POST /auth/logout (server clears cookie) → showAuthPanel"
+      - "page load: GET /auth/me → if 200 showCounterPanel(username) else show auth panel"
+    notes: |
+      auth is plain JS (not WASM) because ceremonies are entirely fetch + navigator.credentials.
+      _b64url uses a loop, not spread, to avoid call-stack overflow on large buffers.
+      _err_msg wraps resp.json() in try/catch to handle non-JSON error responses (e.g. 502 HTML).
+      _webauthn_available() checks window.PublicKeyCredential before calling the API.
 
 shared:
   - name: counter_proto.h
@@ -314,23 +323,19 @@ relationships:
   - from: "auth.js"
     to: "counter_http"
     type: calls
-    note: "fetch to /auth/* endpoints (unauthenticated); stores token in window.__sessionToken"
+    note: "fetch to /auth/* endpoints and /auth/me (unauthenticated); session maintained via HttpOnly cookie"
   - from: "counter_wasm"
     to: "counter_http"
     type: calls
-    note: "emscripten_fetch POST/GET to /increment /decrement /reset /value with Bearer token"
-  - from: "counter_wasm"
-    to: "auth.js"
-    type: depends
-    note: "reads window.__sessionToken via EM_JS bridge to attach Authorization header"
+    note: "emscripten_fetch POST/GET to /increment /decrement /reset /value; browser sends session cookie automatically"
   - from: "counter_http"
     to: "auth_http"
     type: calls
-    note: "delegates /auth/* routes; wraps result in HTTP response"
+    note: "delegates /auth/* routes; wraps {Code, Headers, Body} result in HTTP response"
   - from: "counter_http"
     to: "auth"
     type: calls
-    note: "validate_session(Token) → {ok, Username} to guard counter routes"
+    note: "validate_session(Token) → {ok, Username} to guard counter routes; Token from Cookie header"
   - from: "counter_http"
     to: "counter"
     type: calls
@@ -384,13 +389,15 @@ conventions:
   - "gen_server state is a placeholder (ok) when real state lives in Mnesia"
   - "auth gen_server API functions use mnesia:dirty_* directly — gen_server only needed for table init and hourly purge timer"
   - "counter Mnesia key is the username binary for HTTP clients; atom 'default' for TCP server"
-  - "HTTP Bearer token extracted from Authorization header by collect_headers/2 during header drain"
+  - "session token is an HttpOnly SameSite=Strict cookie named 'session'; JavaScript cannot read it"
+  - "Cookie header extracted by collect_headers/2 via parse_session_cookie/1 during header drain"
   - "auth routes (/auth/*) are unauthenticated; all counter routes require validate_session"
   - "session_guard/4 in counter_http extracts Username from {ok, Username} and passes to counter_route/4"
   - "TCP server (port 9090) bypasses auth entirely — intended as internal/dev tool only"
   - "auth is plain JS (frontend/auth.js), not WASM — ceremonies are all fetch + navigator.credentials with no C-idiomatic work"
-  - "session token lives in window.__sessionToken; counter_wasm.c reads it via EM_JS (js_copy_session_token) not an extern C global"
   - "register/complete creates a session immediately — user is logged in without a separate login step after registering"
+  - "register/begin returns a random userId (not the username) to avoid storing PII on the authenticator"
   - "C client/tests share socket logic via counter_proto.h (shared header, not a library)"
   - "HTTP server uses {packet, http_bin} for parsing then switches to raw for response"
+  - "auth_http handlers return {Code, ExtraHeaders, Body} 3-tuples; counter_http passes ExtraHeaders to response/4"
   - "make test clears port 9090 before starting to ensure a clean server each run"
