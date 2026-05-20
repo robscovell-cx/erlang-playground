@@ -11,9 +11,11 @@
             background: #0d1117;
             color: #c9d1d9;
             display: flex;
-            justify-content: center;
+            flex-direction: column;
             align-items: center;
+            justify-content: center;
             min-height: 100vh;
+            padding: 32px 16px;
         }
 
         .card {
@@ -140,22 +142,14 @@
         <div id="auth-status" class="status"></div>
     </div>
 
-    <!-- Counter panel — shown when logged in -->
-    <div id="counter-panel" class="card" style="display:none">
-        <div class="label">Erlang Counter</div>
-        <div id="current-user" class="sublabel"></div>
-
-        <div id="counter-value" class="value">—</div>
-
-        <div class="controls">
-            <button class="btn-dec"   onclick="Module._decrement()">−</button>
-            <button class="btn-reset" onclick="Module._reset_counter()">Reset</button>
-            <button class="btn-inc"   onclick="Module._increment()">+</button>
+    <!-- Address panel — shown when logged in -->
+    <div id="user_address-panel" class="card" style="display:none">
+        <div class="label">Address</div>
+        <div id="user_address-fields"></div>
+        <div class="controls" style="margin-top:20px">
+            <button class="btn-primary" onclick="saveUserAddress()">Save</button>
         </div>
-
-        <div id="status" class="status"></div>
-
-        <button class="btn-signout" onclick="authLogout()">Sign Out</button>
+        <div id="user_address-status" class="status"></div>
     </div>
 
     <script>
@@ -171,21 +165,26 @@
                 authCheckSession();
             },
             showAuthPanel: function () {
-                document.getElementById("counter-panel").style.display = "none";
-                document.getElementById("auth-panel").style.display   = "block";
-                document.getElementById("auth-status").textContent    = "";
+                document.getElementById("counter-panel").style.display     = "none";
+                document.getElementById("user_address-panel").style.display = "none";
+                document.getElementById("auth-panel").style.display        = "block";
+                document.getElementById("auth-status").textContent         = "";
             },
             showCounterPanel: function (username) {
-                document.getElementById("auth-panel").style.display    = "none";
-                document.getElementById("counter-panel").style.display = "block";
+                document.getElementById("auth-panel").style.display         = "none";
+                document.getElementById("counter-panel").style.display      = "block";
+                document.getElementById("user_address-panel").style.display = "block";
                 if (username) {
                     document.getElementById("current-user").textContent = username;
                 }
                 Module._refresh();
+                buildUserAddressForm();
+                loadUserAddress();
             }
         };
     </script>
     <script src="auth.js"></script>
+    <script src="user_address_form.js"></script>
     <script src="counter.js"></script>
 </body>
 </html>

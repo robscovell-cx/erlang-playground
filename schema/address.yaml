@@ -1,0 +1,20 @@
+table: user_address
+fields:
+  - name: line1
+    label: Street Address
+    required: true
+  - name: line2
+    label: "Apt / Suite"
+    required: false
+  - name: city
+    label: City
+    required: true
+  - name: state
+    label: State / Province
+    required: true
+  - name: postcode
+    label: Postcode
+    required: true
+  - name: country
+    label: Country
+    required: true

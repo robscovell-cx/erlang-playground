@@ -7,6 +7,7 @@
 start() ->
     {ok, _} = counter:start_link(),
     {ok, _} = auth:start_link(),
+    {ok, _} = user_address:start_link(),
     {ok, LSock} = gen_tcp:listen(?HTTP_PORT, [
         binary, {active, false}, {reuseaddr, true}
     ]),
@@ -94,6 +95,10 @@ route('GET', <<"/auth/me">>, _, Token) ->
                      json:encode(#{<<"error">> => <<"Unauthorized">>}))
     end;
 
+%% User address routes — session required
+route('GET',  <<"/user_address">>,    _, Token) -> session_guard_state(get, user_address, <<>>, Token);
+route('POST', <<"/user_address">>, Body, Token) -> session_guard_state(put, user_address, Body, Token);
+
 %% Counter routes — session required
 route(Method, <<"/value">> = Path, Body, Token)     -> session_guard(Method, Path, Body, Token);
 route(Method, <<"/increment">> = Path, Body, Token) -> session_guard(Method, Path, Body, Token);
@@ -121,6 +126,25 @@ counter_route('POST', <<"/increment">>, _, U) -> counter:increment(U), respond_v
 counter_route('POST', <<"/decrement">>, _, U) -> counter:decrement(U), respond_value(U);
 counter_route('POST', <<"/reset">>,     _, U) -> counter:reset(U),     respond_value(U);
 counter_route(_, _, _, _)                     -> response(404, "text/plain", <<"Not Found">>).
+
+session_guard_state(get, Mod, _, Token) ->
+    case auth:validate_session(Token) of
+        {ok, User} ->
+            {ok, Data} = Mod:get(User),
+            response(200, "application/json", json:encode(Data));
+        {error, _} ->
+            response(401, "application/json", [],
+                     json:encode(#{<<"error">> => <<"Unauthorized">>}))
+    end;
+session_guard_state(put, Mod, Body, Token) ->
+    case auth:validate_session(Token) of
+        {ok, User} ->
+            ok = Mod:put(User, json:decode(Body)),
+            response(200, "application/json", <<"{}">>);
+        {error, _} ->
+            response(401, "application/json", [],
+                     json:encode(#{<<"error">> => <<"Unauthorized">>}))
+    end.
 
 respond_value(User) ->
     response(200, "text/plain",

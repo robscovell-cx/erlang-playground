@@ -13,12 +13,16 @@ CDIR         = c
 FRONTEND_SRC = frontend
 FRONTEND_BUILD = $(BUILD)/frontend
 
+GEN_ESCRIPT = $(ERLDIR)/gen_schema.escript
+SCHEMA_DIR  = schema
+
 C_BINS = $(BUILD)/counter_client $(BUILD)/counter_tests
 BEAMS  = $(BUILD)/counter.beam $(BUILD)/counter_server.beam $(BUILD)/counter_http.beam \
          $(BUILD)/auth.beam $(BUILD)/auth_http.beam \
-         $(BUILD)/webauthn.beam $(BUILD)/webauthn_cbor.beam
+         $(BUILD)/webauthn.beam $(BUILD)/webauthn_cbor.beam \
+         $(BUILD)/user_address.beam
 
-.PHONY: all wasm serve test clean
+.PHONY: all wasm serve test gen clean
 
 all: $(BUILD) $(C_BINS) $(BEAMS)
 
@@ -37,12 +41,19 @@ $(BUILD)/counter_tests: $(CDIR)/counter_tests.c $(CDIR)/counter_proto.h | $(BUIL
 $(BUILD)/%.beam: $(ERLDIR)/%.erl | $(BUILD)
 	$(ERLC) -o $(BUILD) $<
 
+## Regenerate Erlang + JS from all schema YAML files.
+gen:
+	@for f in $(SCHEMA_DIR)/*.yaml; do \
+	    escript $(GEN_ESCRIPT) $$f; \
+	done
+
 ## Build the WASM module and copy frontend files into build/frontend/.
 wasm: $(FRONTEND_BUILD)
 	$(EMCC) $(CDIR)/counter_wasm.c \
 	    -o $(FRONTEND_BUILD)/counter.js $(EMFLAGS)
-	cp $(FRONTEND_SRC)/index.html $(FRONTEND_BUILD)/
-	cp $(FRONTEND_SRC)/auth.js    $(FRONTEND_BUILD)/
+	cp $(FRONTEND_SRC)/index.html              $(FRONTEND_BUILD)/
+	cp $(FRONTEND_SRC)/auth.js                 $(FRONTEND_BUILD)/
+	cp $(FRONTEND_SRC)/user_address_form.js    $(FRONTEND_BUILD)/
 
 ## Start the Erlang HTTP server. It serves the API and the frontend from build/frontend/.
 serve: all wasm
