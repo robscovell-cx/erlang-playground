@@ -4,7 +4,6 @@
 #include <string.h>
 #include <stdio.h>
 
-#define API_BASE "http://localhost:8080"
 
 char g_session_token[128] = {0};
 char g_username[256]      = {0};
@@ -27,7 +26,7 @@ EM_ASYNC_JS(void, auth_register_async, (), {
     if (!username) { if (statusEl) statusEl.textContent = "Enter a username"; return; }
 
     try {
-        const r1 = await fetch(API_BASE + "/auth/register/begin", {
+        const r1 = await fetch("http://localhost:8080" + "/auth/register/begin", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify({username})
@@ -56,7 +55,7 @@ EM_ASYNC_JS(void, auth_register_async, (), {
             timeout: 60000
         }});
 
-        const r2 = await fetch(API_BASE + "/auth/register/complete", {
+        const r2 = await fetch("http://localhost:8080" + "/auth/register/complete", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify({
@@ -95,7 +94,7 @@ EM_ASYNC_JS(void, auth_login_async, (char *token_buf, int token_len,
     if (!username) { if (statusEl) statusEl.textContent = "Enter a username"; return; }
 
     try {
-        const r1 = await fetch(API_BASE + "/auth/login/begin", {
+        const r1 = await fetch("http://localhost:8080" + "/auth/login/begin", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify({username})
@@ -120,7 +119,7 @@ EM_ASYNC_JS(void, auth_login_async, (char *token_buf, int token_len,
             timeout: 60000
         }});
 
-        const r2 = await fetch(API_BASE + "/auth/login/complete", {
+        const r2 = await fetch("http://localhost:8080" + "/auth/login/complete", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify({
@@ -149,7 +148,7 @@ EM_ASYNC_JS(void, auth_login_async, (char *token_buf, int token_len,
 EM_ASYNC_JS(void, auth_logout_async, (char *token_buf), {
     const token = UTF8ToString(token_buf);
     try {
-        await fetch(API_BASE + "/auth/logout", {
+        await fetch("http://localhost:8080" + "/auth/logout", {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
