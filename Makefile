@@ -13,7 +13,7 @@ CDIR         = c
 FRONTEND_SRC = frontend
 FRONTEND_BUILD = $(BUILD)/frontend
 
-C_BINS = $(BUILD)/counter_client $(BUILD)/counter_tests $(BUILD)/wc
+C_BINS = $(BUILD)/counter_client $(BUILD)/counter_tests
 BEAMS  = $(BUILD)/counter.beam $(BUILD)/counter_server.beam $(BUILD)/counter_http.beam \
          $(BUILD)/auth.beam $(BUILD)/auth_http.beam \
          $(BUILD)/webauthn.beam $(BUILD)/webauthn_cbor.beam
@@ -32,9 +32,6 @@ $(BUILD)/counter_client: $(CDIR)/counter_client.c $(CDIR)/counter_proto.h | $(BU
 	$(CC) $(CFLAGS) -o $@ $<
 
 $(BUILD)/counter_tests: $(CDIR)/counter_tests.c $(CDIR)/counter_proto.h | $(BUILD)
-	$(CC) $(CFLAGS) -o $@ $<
-
-$(BUILD)/wc: $(CDIR)/wc.c | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ $<
 
 $(BUILD)/%.beam: $(ERLDIR)/%.erl | $(BUILD)

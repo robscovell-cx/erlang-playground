@@ -164,11 +164,11 @@
          * available here. */
         var Module = {
             onRuntimeInitialized: function () {
-                if (authIsLoggedIn()) {
-                    Module.showCounterPanel("");
-                } else {
-                    document.getElementById("auth-panel").style.display = "block";
-                }
+                /* Show the auth panel first, then check asynchronously whether
+                 * the browser holds a valid session cookie.  If it does,
+                 * authCheckSession() will switch to the counter panel. */
+                document.getElementById("auth-panel").style.display = "block";
+                authCheckSession();
             },
             showAuthPanel: function () {
                 document.getElementById("counter-panel").style.display = "none";

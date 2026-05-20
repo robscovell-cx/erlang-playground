@@ -6,32 +6,64 @@
  *   2. Ask the authenticator to act on it      (navigator.credentials)
  *   3. Send the result back to the server      (complete endpoint)
  *
- * The session token is stored in window.__sessionToken.  counter_wasm.c reads
- * it from there via an EM_JS bridge and attaches it as an Authorization header
- * on every counter request.
+ * The session is maintained via an HttpOnly cookie set by the server on a
+ * successful login or registration. HttpOnly means JavaScript cannot read the
+ * token, so it cannot be exfiltrated by an XSS attack. The browser sends it
+ * automatically with every same-origin request — counter_wasm.c does not need
+ * to attach any Authorization header.
  */
 
-const _API = "http://localhost:8080";
+const _API = 'http://localhost:8080';
 
-/* Session state.  Lives on window so counter_wasm.c can read it from C via
- * an EM_JS call.  Resets on every hard page load (no localStorage / cookie). */
-window.__sessionToken = "";
+/* ---------------------------------------------------------------------- */
+/* Helpers                                                                 */
+/* ---------------------------------------------------------------------- */
 
-function authIsLoggedIn() {
-    return window.__sessionToken !== "";
-}
-
-/* base64url encode/decode — needed to convert between the binary buffers the
- * WebAuthn API produces and the strings the server JSON API expects. */
+/* base64url encode.  Uses a loop rather than spread (String.fromCharCode
+ * ...new Uint8Array) to avoid exceeding the JavaScript engine's call-stack
+ * argument limit on large buffers (typically ~65 000 items). */
 function _b64url(buf) {
-    return btoa(String.fromCharCode(...new Uint8Array(buf)))
-        .replace(/[+]/g, "-").split("/").join("_").replace(/=/g, "");
+    const bytes = new Uint8Array(buf);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary).replace(/[+]/g, '-').split('/').join('_').replace(/=/g, '');
 }
 
 function _b64url_decode(s) {
-    s = s.replace(/-/g, "+").split("_").join("/");
-    while (s.length % 4) s += "=";
+    s = s.replace(/-/g, '+').split('_').join('/');
+    while (s.length % 4) s += '=';
     return Uint8Array.from(atob(s), c => c.charCodeAt(0));
+}
+
+/* Extract an error message from a non-OK response.  Falls back to the HTTP
+ * status code if the body is not valid JSON (e.g. a proxy returned HTML). */
+async function _err_msg(resp) {
+    try { const e = await resp.json(); return e.error || String(resp.status); }
+    catch (_) { return String(resp.status); }
+}
+
+/* Check that the WebAuthn API is available.  It requires a Secure Context
+ * (HTTPS or localhost) and is absent in very old browsers. */
+function _webauthn_available() {
+    return !!(window.PublicKeyCredential && navigator.credentials);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Session check — called from Module.onRuntimeInitialized                */
+/*                                                                         */
+/* Hits /auth/me with the session cookie the browser holds.  If valid,    */
+/* switches to the counter panel; otherwise leaves the auth panel shown.  */
+/* ---------------------------------------------------------------------- */
+
+async function authCheckSession() {
+    try {
+        const r = await fetch(_API + '/auth/me');
+        if (r.ok) {
+            const data = await r.json();
+            Module.showCounterPanel(data.username);
+        }
+        /* 401 or network error → stay on auth panel */
+    } catch (_) {}
 }
 
 /* ---------------------------------------------------------------------- */
@@ -39,21 +71,28 @@ function _b64url_decode(s) {
 /* ---------------------------------------------------------------------- */
 
 async function authRegister() {
-    const usernameEl = document.getElementById("username-input");
-    const statusEl   = document.getElementById("auth-status");
-    const username   = usernameEl ? usernameEl.value.trim() : "";
-    if (!username) { if (statusEl) statusEl.textContent = "Enter a username"; return; }
+    const usernameEl = document.getElementById('username-input');
+    const statusEl   = document.getElementById('auth-status');
+    const username   = usernameEl ? usernameEl.value.trim() : '';
+    if (!username) { if (statusEl) statusEl.textContent = 'Enter a username'; return; }
+
+    if (!_webauthn_available()) {
+        if (statusEl) statusEl.textContent = 'Passkeys are not supported in this browser';
+        return;
+    }
 
     try {
-        /* Step 1 — get a challenge and RP metadata from the server. */
-        const r1 = await fetch(_API + "/auth/register/begin", {
-            method:  "POST",
-            headers: {"Content-Type": "application/json"},
+        /* Step 1 — get a challenge, RP metadata, and a random user ID from
+         * the server.  The user ID is a random value, not the username: the
+         * WebAuthn spec warns against using PII for user.id because it may be
+         * stored on the authenticator and could be read off the device. */
+        const r1 = await fetch(_API + '/auth/register/begin', {
+            method:  'POST',
+            headers: {'Content-Type': 'application/json'},
             body:    JSON.stringify({username})
         });
         if (!r1.ok) {
-            const e = await r1.json();
-            if (statusEl) statusEl.textContent = "Error: " + (e.error || r1.status);
+            if (statusEl) statusEl.textContent = 'Error: ' + (await _err_msg(r1));
             return;
         }
         const opts = await r1.json();
@@ -64,22 +103,23 @@ async function authRegister() {
         const cred = await navigator.credentials.create({publicKey: {
             challenge:        _b64url_decode(opts.challenge),
             rp:               {id: opts.rpId, name: opts.rpName},
-            user:             {id: new TextEncoder().encode(username),
-                               name: username, displayName: username},
-            pubKeyCredParams: [{type: "public-key", alg: -7}],
-            authenticatorSelection: {residentKey: "preferred",
-                                     userVerification: "preferred"},
-            attestation: "none",
+            user:             {id:          _b64url_decode(opts.userId),
+                               name:        username,
+                               displayName: username},
+            pubKeyCredParams: [{type: 'public-key', alg: -7}],
+            authenticatorSelection: {residentKey: 'preferred',
+                                     userVerification: 'preferred'},
+            attestation: 'none',
             timeout:     60000
         }});
 
         /* Step 3 — send the attestation to the server.  The server verifies
-         * the signed authData, extracts the public key, and stores the
-         * credential.  On success it also creates a session token so we are
-         * immediately logged in without a separate login step. */
-        const r2 = await fetch(_API + "/auth/register/complete", {
-            method:  "POST",
-            headers: {"Content-Type": "application/json"},
+         * the signed authData, extracts the public key, stores the credential,
+         * and sets an HttpOnly session cookie.  No token appears in the JSON
+         * body — it lives only in the cookie, invisible to JavaScript. */
+        const r2 = await fetch(_API + '/auth/register/complete', {
+            method:  'POST',
+            headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
                 username,
                 challenge:         opts.challenge,
@@ -89,14 +129,12 @@ async function authRegister() {
         });
         if (r2.ok) {
             const data = await r2.json();
-            window.__sessionToken = data.token;
-            Module.showCounterPanel(username);
+            Module.showCounterPanel(data.username);
         } else {
-            const e = await r2.json();
-            if (statusEl) statusEl.textContent = "Registration failed: " + (e.error || r2.status);
+            if (statusEl) statusEl.textContent = 'Registration failed: ' + (await _err_msg(r2));
         }
     } catch (err) {
-        if (statusEl) statusEl.textContent = "Registration error: " + err.message;
+        if (statusEl) statusEl.textContent = 'Registration error: ' + err.message;
     }
 }
 
@@ -105,22 +143,26 @@ async function authRegister() {
 /* ---------------------------------------------------------------------- */
 
 async function authLogin() {
-    const usernameEl = document.getElementById("username-input");
-    const statusEl   = document.getElementById("auth-status");
-    const username   = usernameEl ? usernameEl.value.trim() : "";
-    if (!username) { if (statusEl) statusEl.textContent = "Enter a username"; return; }
+    const usernameEl = document.getElementById('username-input');
+    const statusEl   = document.getElementById('auth-status');
+    const username   = usernameEl ? usernameEl.value.trim() : '';
+    if (!username) { if (statusEl) statusEl.textContent = 'Enter a username'; return; }
+
+    if (!_webauthn_available()) {
+        if (statusEl) statusEl.textContent = 'Passkeys are not supported in this browser';
+        return;
+    }
 
     try {
         /* Step 1 — get a challenge and the credential IDs registered for
          * this user so the authenticator knows which private key to use. */
-        const r1 = await fetch(_API + "/auth/login/begin", {
-            method:  "POST",
-            headers: {"Content-Type": "application/json"},
+        const r1 = await fetch(_API + '/auth/login/begin', {
+            method:  'POST',
+            headers: {'Content-Type': 'application/json'},
             body:    JSON.stringify({username})
         });
         if (!r1.ok) {
-            const e = await r1.json();
-            if (statusEl) statusEl.textContent = "Error: " + (e.error || r1.status);
+            if (statusEl) statusEl.textContent = 'Error: ' + (await _err_msg(r1));
             return;
         }
         const opts = await r1.json();
@@ -132,19 +174,18 @@ async function authLogin() {
             challenge:        _b64url_decode(opts.challenge),
             rpId:             opts.rpId,
             allowCredentials: (opts.allowCredentials || []).map(c => ({
-                                  type: "public-key",
+                                  type: 'public-key',
                                   id:   _b64url_decode(c.id)
                               })),
-            userVerification: "preferred",
+            userVerification: 'preferred',
             timeout:          60000
         }});
 
-        /* Step 3 — send the assertion to the server.  The server verifies
-         * the ECDSA signature against the stored public key, checks the
-         * sign count, and issues a session token. */
-        const r2 = await fetch(_API + "/auth/login/complete", {
-            method:  "POST",
-            headers: {"Content-Type": "application/json"},
+        /* Step 3 — send the assertion to the server.  The server verifies the
+         * ECDSA signature, checks the sign count, and sets the session cookie. */
+        const r2 = await fetch(_API + '/auth/login/complete', {
+            method:  'POST',
+            headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
                 credentialId:      _b64url(assertion.rawId),
                 authenticatorData: _b64url(assertion.response.authenticatorData),
@@ -154,14 +195,12 @@ async function authLogin() {
         });
         if (r2.ok) {
             const data = await r2.json();
-            window.__sessionToken = data.token;
             Module.showCounterPanel(data.username);
         } else {
-            const e = await r2.json();
-            if (statusEl) statusEl.textContent = "Login failed: " + (e.error || r2.status);
+            if (statusEl) statusEl.textContent = 'Login failed: ' + (await _err_msg(r2));
         }
     } catch (err) {
-        if (statusEl) statusEl.textContent = "Login error: " + err.message;
+        if (statusEl) statusEl.textContent = 'Login error: ' + err.message;
     }
 }
 
@@ -170,17 +209,11 @@ async function authLogin() {
 /* ---------------------------------------------------------------------- */
 
 async function authLogout() {
-    const token = window.__sessionToken;
-    /* Clear the token immediately so counter_wasm.c stops sending it even if
-     * the network request below is slow or fails. */
-    window.__sessionToken = "";
+    /* Fire and forget — the server deletes the session row and returns
+     * Set-Cookie: session=; Max-Age=0 to clear the browser's cookie.
+     * Navigate back to the auth panel immediately regardless of outcome. */
     try {
-        await fetch(_API + "/auth/logout", {
-            method:  "POST",
-            headers: {"Content-Type": "application/json",
-                      "Authorization": "Bearer " + token},
-            body:    "{}"
-        });
+        await fetch(_API + '/auth/logout', {method: 'POST'});
     } catch (_) {}
     Module.showAuthPanel();
 }

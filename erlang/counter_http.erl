@@ -37,8 +37,8 @@ collect_headers(Sock, Len, Token) ->
             {Len, Token};
         {ok, {http_header, _, 'Content-Length', _, Val}} ->
             collect_headers(Sock, binary_to_integer(Val), Token);
-        {ok, {http_header, _, 'Authorization', _, Val}} ->
-            T = parse_bearer(Val),
+        {ok, {http_header, _, 'Cookie', _, Val}} ->
+            T = parse_session_cookie(Val),
             collect_headers(Sock, Len, T);
         {ok, _} ->
             collect_headers(Sock, Len, Token);
@@ -46,8 +46,14 @@ collect_headers(Sock, Len, Token) ->
             {Len, Token}
     end.
 
-parse_bearer(<<"Bearer ", Token/binary>>) -> Token;
-parse_bearer(_)                           -> undefined.
+%% Extract the "session" value from a Cookie header.
+%% Cookie header format: "name1=val1; name2=val2; ..."
+parse_session_cookie(CookieHeader) ->
+    Parts = binary:split(CookieHeader, <<"; ">>, [global]),
+    case [V || <<"session=", V/binary>> <- Parts] of
+        [Token | _] -> Token;
+        []          -> undefined
+    end.
 
 read_body(_Sock, 0)   -> <<>>;
 read_body(Sock, Len) ->
@@ -61,20 +67,32 @@ route('OPTIONS', _, _, _) ->
 
 %% Auth routes — no session required
 route('POST', <<"/auth/register/begin">>,    Body, _Token) ->
-    {Code, Resp} = auth_http:handle_register_begin(Body),
-    response(Code, "application/json", Resp);
+    {Code, Hdrs, Resp} = auth_http:handle_register_begin(Body),
+    response(Code, "application/json", Hdrs, Resp);
 route('POST', <<"/auth/register/complete">>, Body, _Token) ->
-    {Code, Resp} = auth_http:handle_register_complete(Body),
-    response(Code, "application/json", Resp);
+    {Code, Hdrs, Resp} = auth_http:handle_register_complete(Body),
+    response(Code, "application/json", Hdrs, Resp);
 route('POST', <<"/auth/login/begin">>,       Body, _Token) ->
-    {Code, Resp} = auth_http:handle_login_begin(Body),
-    response(Code, "application/json", Resp);
+    {Code, Hdrs, Resp} = auth_http:handle_login_begin(Body),
+    response(Code, "application/json", Hdrs, Resp);
 route('POST', <<"/auth/login/complete">>,    Body, _Token) ->
-    {Code, Resp} = auth_http:handle_login_complete(Body),
-    response(Code, "application/json", Resp);
+    {Code, Hdrs, Resp} = auth_http:handle_login_complete(Body),
+    response(Code, "application/json", Hdrs, Resp);
 route('POST', <<"/auth/logout">>,            _Body, Token) ->
-    {Code, Resp} = auth_http:handle_logout(Token),
-    response(Code, "application/json", Resp);
+    {Code, Hdrs, Resp} = auth_http:handle_logout(Token),
+    response(Code, "application/json", Hdrs, Resp);
+
+%% Session check — lightweight endpoint the frontend uses on page load to
+%% restore login state without re-running the full WebAuthn ceremony.
+route('GET', <<"/auth/me">>, _, Token) ->
+    case auth:validate_session(Token) of
+        {ok, Username} ->
+            response(200, "application/json", [],
+                     json:encode(#{<<"username">> => Username}));
+        {error, _} ->
+            response(401, "application/json", [],
+                     json:encode(#{<<"error">> => <<"Unauthorized">>}))
+    end;
 
 %% Counter routes — session required
 route(Method, <<"/value">> = Path, Body, Token)     -> session_guard(Method, Path, Body, Token);
@@ -94,7 +112,7 @@ route(_, _, _, _) ->
 session_guard(Method, Path, Body, Token) ->
     case auth:validate_session(Token) of
         {ok, User} -> counter_route(Method, Path, Body, User);
-        {error, _} -> response(401, "application/json",
+        {error, _} -> response(401, "application/json", [],
                            json:encode(#{<<"error">> => <<"Unauthorized">>}))
     end.
 
@@ -123,14 +141,18 @@ mime(_)       -> "application/octet-stream".
 cors_headers() ->
     "Access-Control-Allow-Origin: *\r\n"
     "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-    "Access-Control-Allow-Headers: Content-Type, Authorization\r\n".
+    "Access-Control-Allow-Headers: Content-Type\r\n".
 
 response(Code, ContentType, Body) ->
+    response(Code, ContentType, [], Body).
+
+response(Code, ContentType, ExtraHeaders, Body) ->
     Bin = iolist_to_binary(Body),
     Len = byte_size(Bin),
     [status_line(Code),
      "Content-Type: ", ContentType, "\r\n",
      cors_headers(),
+     [[Name, ": ", Value, "\r\n"] || {Name, Value} <- ExtraHeaders],
      io_lib:format("Content-Length: ~w\r\n\r\n", [Len]),
      Bin].
 
