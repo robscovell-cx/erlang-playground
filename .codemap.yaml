@@ -86,21 +86,117 @@ services:
   - name: counter_http
     path: "erlang/counter_http.erl"
     purpose: "HTTP/1.1 server (port 8080); starts counter + auth gen_servers; serves counter API and static frontend"
-    endpoints:
-      - "OPTIONS /*                    → CORS preflight"
-      - "POST /auth/register/begin     → issue registration challenge (unauthenticated)"
-      - "POST /auth/register/complete  → verify attestation, store credential (unauthenticated)"
-      - "POST /auth/login/begin        → issue assertion challenge (unauthenticated)"
-      - "POST /auth/login/complete     → verify assertion, create session, return Bearer token"
-      - "POST /auth/logout             → delete session"
-      - "GET  /                        → serve build/frontend/index.html"
-      - "GET  /<file>                  → serve static file from build/frontend/"
-      - "GET  /value                   → return caller's counter value (session required)"
-      - "POST /increment               → increment caller's counter (session required)"
-      - "POST /decrement               → decrement caller's counter (session required)"
-      - "POST /reset                   → reset caller's counter to 0 (session required)"
     auth: "Bearer token in Authorization header; validate_session extracts Username for counter key"
     notes: "Uses {packet, http_bin} for request parsing; collect_headers/2 accumulates Content-Length and Authorization"
+    endpoints:
+      - method: OPTIONS
+        path: "/*"
+        auth: none
+        body: none
+        response: "200 (CORS preflight headers)"
+
+      - method: GET
+        path: "/"
+        auth: none
+        body: none
+        response: "200 text/html — serves build/frontend/index.html"
+
+      - method: GET
+        path: "/<file>"
+        auth: none
+        body: none
+        response: "200 with inferred MIME type | 404"
+
+      - method: GET
+        path: "/value"
+        auth: "Bearer <token>"
+        body: none
+        response: "200 text/plain — current counter value as integer string | 401"
+
+      - method: POST
+        path: "/increment"
+        auth: "Bearer <token>"
+        body: none
+        response: "200 text/plain — new counter value as integer string | 401"
+
+      - method: POST
+        path: "/decrement"
+        auth: "Bearer <token>"
+        body: none
+        response: "200 text/plain — new counter value as integer string | 401"
+
+      - method: POST
+        path: "/reset"
+        auth: "Bearer <token>"
+        body: none
+        response: "200 text/plain — \"0\" | 401"
+
+      - method: POST
+        path: "/auth/register/begin"
+        auth: none
+        body:
+          content_type: application/json
+          fields:
+            username: "string — the username to register"
+        response_ok: |
+          200 application/json
+          { "challenge": "<base64url 32-byte random>",
+            "rpId":      "localhost",
+            "rpName":    "Counter App" }
+        response_err: "409 {\"error\":\"user_exists\"} | 400 {\"error\":\"bad_request\"}"
+
+      - method: POST
+        path: "/auth/register/complete"
+        auth: none
+        body:
+          content_type: application/json
+          fields:
+            username:          "string — must match the username from register/begin"
+            challenge:         "base64url string — the challenge returned by register/begin"
+            attestationObject: "base64url string — CBOR-encoded attestationObject from navigator.credentials.create"
+            clientDataJSON:    "base64url string — JSON blob from navigator.credentials.create"
+        response_ok: "201 application/json {\"status\":\"ok\"}"
+        response_err: "400 {\"error\":\"<reason>\"} — expired | not_found | bad_type | bad_origin | challenge_mismatch | bad_rp_id | user_presence_required | invalid_attestation_signature | unsupported_cose_key | ..."
+
+      - method: POST
+        path: "/auth/login/begin"
+        auth: none
+        body:
+          content_type: application/json
+          fields:
+            username: "string — the username to authenticate"
+        response_ok: |
+          200 application/json
+          { "challenge":        "<base64url 32-byte random>",
+            "rpId":             "localhost",
+            "allowCredentials": [ { "type": "public-key", "id": "<base64url credentialId>" }, ... ] }
+        response_err: "404 {\"error\":\"user_not_found\"} | 400 {\"error\":\"bad_request\"}"
+
+      - method: POST
+        path: "/auth/login/complete"
+        auth: none
+        body:
+          content_type: application/json
+          fields:
+            credentialId:      "base64url string — rawId from navigator.credentials.get assertion"
+            authenticatorData: "base64url string — authenticatorData from assertion.response"
+            clientDataJSON:    "base64url string — clientDataJSON from assertion.response (challenge extracted server-side)"
+            signature:         "base64url string — signature from assertion.response"
+        response_ok: |
+          200 application/json
+          { "token":    "<base64url 32-byte session token>",
+            "username": "<username>" }
+        response_err: "401 {\"error\":\"<reason>\"} — not_found | expired | credential_not_found | invalid_signature | sign_count_replay | ... | 400 {\"error\":\"bad_request\"}"
+
+      - method: POST
+        path: "/auth/logout"
+        auth: "Bearer <token> (token extracted from Authorization header, not body)"
+        body:
+          content_type: application/json
+          fields: {}
+          note: "body is ignored; session identified entirely by the Bearer token"
+        response_ok: "200 application/json {\"status\":\"ok\"}"
+        response_err: "always 200 (delete_session is idempotent)"
 
   - name: auth_http
     path: "erlang/auth_http.erl"
