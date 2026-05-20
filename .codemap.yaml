@@ -3,22 +3,23 @@
 # Regenerate by invoking the code-map skill.
 
 version: 1
-generated: "2026-05-20T00:00:00Z"
+generated: "2026-05-20T12:00:00Z"
 
 overview:
   name: "erlang-playground"
   purpose: "Per-user Erlang/OTP counter with passkey (WebAuthn) authentication, C clients, and WASM frontend"
   tech:
     - "Erlang/OTP 28"
-    - "C (POSIX sockets, Emscripten WASM)"
+    - "C (POSIX sockets, Emscripten WASM — counter only)"
+    - "JavaScript (auth ceremonies — plain JS, no WASM)"
     - "WebAuthn / FIDO2 (passkeys)"
     - "WebAssembly (Emscripten 5.0.7)"
   architecture: "Browser (WASM) → HTTP server → auth gen_server + counter gen_server → Mnesia disc_copies"
 
 directories:
   "erlang/": "Erlang/OTP source — gen_servers, HTTP/TCP servers, WebAuthn verification, escript"
-  "c/":      "C source — TCP client, WASM modules (counter + auth), test suite, shared protocol header, wc tool"
-  "frontend/": "HTML shell for WASM frontend (source; built output goes to build/frontend/)"
+  "c/":      "C source — TCP client, WASM counter module, test suite, shared protocol header, wc tool"
+  "frontend/": "HTML shell + auth.js for WASM frontend (source; built output goes to build/frontend/)"
   "build/":    "All compiled artifacts — .beam files, C binaries, WASM JS/wasm (gitignored)"
 
 services:
@@ -155,8 +156,13 @@ services:
             challenge:         "base64url string — the challenge returned by register/begin"
             attestationObject: "base64url string — CBOR-encoded attestationObject from navigator.credentials.create"
             clientDataJSON:    "base64url string — JSON blob from navigator.credentials.create"
-        response_ok: "201 application/json {\"status\":\"ok\"}"
+        response_ok: |
+          201 application/json
+          { "status":   "ok",
+            "token":    "<base64url 32-byte session token>",
+            "username": "<username>" }
         response_err: "400 {\"error\":\"<reason>\"} — expired | not_found | bad_type | bad_origin | challenge_mismatch | bad_rp_id | user_presence_required | invalid_attestation_signature | unsupported_cose_key | ..."
+        notes: "creates a session immediately so the user is logged in without a separate login step"
 
       - method: POST
         path: "/auth/login/begin"
@@ -203,7 +209,7 @@ services:
     purpose: "Route handler functions called from counter_http; each returns {HttpCode, JsonBody}"
     handlers:
       - "handle_register_begin/1(Body)    → check user non-existence, create challenge, return {200, JSON}"
-      - "handle_register_complete/1(Body) → consume challenge, verify_registration, register_credential → {201, JSON}"
+      - "handle_register_complete/1(Body) → consume challenge, verify_registration, register_credential, create_session → {201, JSON with token}"
       - "handle_login_begin/1(Body)       → get credentials, create challenge, return allowCredentials → {200, JSON}"
       - "handle_login_complete/1(Body)    → consume challenge, find_credential, verify_assertion, create_session → {200, JSON}"
       - "handle_logout/1(Token)           → delete_session → {200, JSON}"
@@ -277,19 +283,19 @@ clients:
     path: "c/counter_wasm.c"
     purpose: "Emscripten WASM module; emscripten_fetch to counter_http API; sends Bearer token; handles 401"
     exports: ["increment()", "decrement()", "reset_counter()", "refresh()"]
-    auth: "reads extern g_session_token[128] from auth_wasm.c; sets Authorization: Bearer header"
-    notes: "on_success checks fetch->status == 401 → clears token, calls Module.showAuthPanel()"
+    auth: "reads session token from window.__sessionToken via EM_JS bridge (js_copy_session_token); sets Authorization: Bearer header"
+    notes: "on_success checks fetch->status == 401 → clears window.__sessionToken, calls Module.showAuthPanel()"
 
-  - name: auth_wasm
-    path: "c/auth_wasm.c"
-    purpose: "Emscripten WASM module; EM_ASYNC_JS flows for passkey register/login/logout via navigator.credentials"
-    globals: ["g_session_token[128]", "g_username[256]"]
-    exports: ["auth_register()", "auth_login()", "auth_logout()", "auth_is_logged_in()"]
+  - name: auth.js
+    path: "frontend/auth.js"
+    purpose: "Plain JS WebAuthn auth — register, login, logout; no WASM"
+    token_storage: "window.__sessionToken (read by counter_wasm.c via EM_JS; reset on page load)"
+    exports: ["authRegister()", "authLogin()", "authLogout()", "authIsLoggedIn()"]
     flows:
-      - "register: fetch /auth/register/begin → navigator.credentials.create → fetch /auth/register/complete → showCounterPanel"
-      - "login:    fetch /auth/login/begin → navigator.credentials.get → fetch /auth/login/complete → store token → showCounterPanel"
-      - "logout:   POST /auth/logout → clear globals → showAuthPanel"
-    notes: "EM_ASYNC_JS JS bodies must not use C preprocessor macros (# stringifies without expanding); avoid /\\// regex (triggers C // comment); use /[+]/ not /\\+/ (# strips backslash)"
+      - "register: POST /auth/register/begin → navigator.credentials.create → POST /auth/register/complete → store token → showCounterPanel"
+      - "login:    POST /auth/login/begin → navigator.credentials.get → POST /auth/login/complete → store token → showCounterPanel"
+      - "logout:   clear token → POST /auth/logout → showAuthPanel"
+    notes: "auth is plain JS (not WASM) because the ceremonies are entirely fetch + navigator.credentials; no C-idiomatic work"
 
   - name: wc
     path: "c/wc.c"
@@ -305,18 +311,18 @@ shared:
     purpose: "Shared C header — counter_connect() and counter_transact() used by client and tests"
 
 relationships:
-  - from: "Browser (WASM)"
+  - from: "auth.js"
     to: "counter_http"
     type: calls
-    note: "HTTP fetch with Authorization: Bearer <token> (port 8080)"
-  - from: "auth_wasm"
-    to: "counter_http"
-    type: calls
-    note: "navigator.credentials + fetch to /auth/* endpoints (unauthenticated)"
+    note: "fetch to /auth/* endpoints (unauthenticated); stores token in window.__sessionToken"
   - from: "counter_wasm"
     to: "counter_http"
     type: calls
     note: "emscripten_fetch POST/GET to /increment /decrement /reset /value with Bearer token"
+  - from: "counter_wasm"
+    to: "auth.js"
+    type: depends
+    note: "reads window.__sessionToken via EM_JS bridge to attach Authorization header"
   - from: "counter_http"
     to: "auth_http"
     type: calls
@@ -366,11 +372,11 @@ build:
   tool: "make"
   targets:
     - "all   → compile C binaries and .beam files (7 beams)"
-    - "wasm  → emcc counter_wasm.c auth_wasm.c → build/frontend/counter.js + copy index.html"
+    - "wasm  → emcc counter_wasm.c → build/frontend/counter.js + copy index.html + copy auth.js"
     - "serve → all + wasm + kill :8080 + start counter_http on port 8080"
     - "test  → all + start counter_server + run counter_tests (TCP, no auth) + kill server"
     - "clean → rm -rf build/ erl_crash.dump"
-  emflags: "-O2 -sFETCH -sASYNCIFY"
+  emflags: "-O2 -sFETCH (no -sASYNCIFY — counter_wasm uses callbacks not async/await)"
   artifacts: "build/ (gitignored)"
   mnesia_data: "Mnesia.nonode@nohost/ in working dir (gitignored)"
 
@@ -382,8 +388,9 @@ conventions:
   - "auth routes (/auth/*) are unauthenticated; all counter routes require validate_session"
   - "session_guard/4 in counter_http extracts Username from {ok, Username} and passes to counter_route/4"
   - "TCP server (port 9090) bypasses auth entirely — intended as internal/dev tool only"
-  - "EM_ASYNC_JS JS bodies: no C preprocessor macros (not expanded by #); no /\\// regex; use /[+]/ for literal +"
-  - "b64url helpers inlined in each EM_ASYNC_JS body (cannot share between EM_ASYNC_JS scopes)"
+  - "auth is plain JS (frontend/auth.js), not WASM — ceremonies are all fetch + navigator.credentials with no C-idiomatic work"
+  - "session token lives in window.__sessionToken; counter_wasm.c reads it via EM_JS (js_copy_session_token) not an extern C global"
+  - "register/complete creates a session immediately — user is logged in without a separate login step after registering"
   - "C client/tests share socket logic via counter_proto.h (shared header, not a library)"
   - "HTTP server uses {packet, http_bin} for parsing then switches to raw for response"
   - "make test clears port 9090 before starting to ensure a clean server each run"
