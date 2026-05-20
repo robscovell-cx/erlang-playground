@@ -6,12 +6,27 @@
 
 #define API_BASE "http://localhost:8080"
 
-extern char g_session_token[128];
+/*
+ * Read the session token from the JS auth module into a C buffer.
+ * auth.js stores it in window.__sessionToken; this EM_JS bridge copies it
+ * into WASM memory so do_fetch() can attach it as a Bearer header.
+ * Returns 1 if a token is present, 0 if the user is not logged in.
+ */
+EM_JS(int, js_copy_session_token, (char *buf, int len), {
+    const tok = window.__sessionToken || "";
+    if (!tok) return 0;
+    stringToUTF8(tok, buf, len);
+    return 1;
+});
 
 static void on_success(emscripten_fetch_t *fetch) {
     if (fetch->status == 401) {
-        memset(g_session_token, 0, 128);
-        EM_ASM(Module.showAuthPanel());
+        /* Session expired or revoked server-side. Clear the JS token and
+         * return to the auth panel so the user can log in again. */
+        EM_ASM({
+            window.__sessionToken = "";
+            Module.showAuthPanel();
+        });
         emscripten_fetch_close(fetch);
         return;
     }
@@ -41,9 +56,10 @@ static void do_fetch(const char *method, const char *url) {
     attr.onsuccess  = on_success;
     attr.onerror    = on_error;
 
+    static char token_buf[128];
     static char auth_header[160];
-    if (g_session_token[0] != '\0') {
-        snprintf(auth_header, sizeof(auth_header), "Bearer %s", g_session_token);
+    if (js_copy_session_token(token_buf, sizeof(token_buf))) {
+        snprintf(auth_header, sizeof(auth_header), "Bearer %s", token_buf);
         static const char *headers[] = {"Authorization", auth_header, NULL};
         attr.requestHeaders = headers;
     }

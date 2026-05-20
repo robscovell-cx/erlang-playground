@@ -67,7 +67,12 @@ handle_register_complete(Body) ->
                         %% EC point (04 || X || Y) — this is all we need for future
                         %% signature verification.
                         ok = auth:register_credential(Username, CredId, PubKey, SC),
-                        {201, json:encode(#{<<"status">> => <<"ok">>})}
+                        %% Create a session immediately so the user is logged in
+                        %% without a separate login step after registering.
+                        {ok, Token} = auth:create_session(Username),
+                        {201, json:encode(#{<<"status">>   => <<"ok">>,
+                                            <<"token">>    => Token,
+                                            <<"username">> => Username})}
                 end;
             {ok, _OtherUser} ->
                 {400, json_err(<<"challenge_user_mismatch">>)}

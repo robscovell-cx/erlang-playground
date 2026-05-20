@@ -2,9 +2,9 @@ CC           = cc
 CFLAGS       = -Wall -Wextra
 ERLC         = erlc
 EMCC         = emcc
-EMFLAGS      = -O2 -sFETCH -sASYNCIFY \
-               -sEXPORTED_FUNCTIONS='["_increment","_decrement","_reset_counter","_refresh","_auth_register","_auth_login","_auth_logout","_auth_is_logged_in"]' \
-               -sEXPORTED_RUNTIME_METHODS='["ccall","UTF8ToString","stringToUTF8"]'
+EMFLAGS      = -O2 -sFETCH \
+               -sEXPORTED_FUNCTIONS='["_increment","_decrement","_reset_counter","_refresh"]' \
+               -sEXPORTED_RUNTIME_METHODS='["UTF8ToString","stringToUTF8"]'
 COUNTER_PORT = 9090
 HTTP_PORT    = 8080
 BUILD        = build
@@ -40,11 +40,12 @@ $(BUILD)/wc: $(CDIR)/wc.c | $(BUILD)
 $(BUILD)/%.beam: $(ERLDIR)/%.erl | $(BUILD)
 	$(ERLC) -o $(BUILD) $<
 
-## Build the WASM module and copy the HTML shell into build/frontend/.
+## Build the WASM module and copy frontend files into build/frontend/.
 wasm: $(FRONTEND_BUILD)
-	$(EMCC) $(CDIR)/counter_wasm.c $(CDIR)/auth_wasm.c \
+	$(EMCC) $(CDIR)/counter_wasm.c \
 	    -o $(FRONTEND_BUILD)/counter.js $(EMFLAGS)
 	cp $(FRONTEND_SRC)/index.html $(FRONTEND_BUILD)/
+	cp $(FRONTEND_SRC)/auth.js    $(FRONTEND_BUILD)/
 
 ## Start the Erlang HTTP server. It serves the API and the frontend from build/frontend/.
 serve: all wasm

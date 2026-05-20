@@ -134,10 +134,8 @@
         <input id="username-input" type="text" placeholder="Username"
                autocomplete="username webauthn" />
         <div class="controls">
-            <button class="btn-primary"
-                    onclick="Module.ccall('auth_register',null,[],[])">Register Passkey</button>
-            <button class="btn-primary"
-                    onclick="Module.ccall('auth_login',null,[],[])">Sign In</button>
+            <button class="btn-primary" onclick="authRegister()">Register Passkey</button>
+            <button class="btn-primary" onclick="authLogin()">Sign In</button>
         </div>
         <div id="auth-status" class="status"></div>
     </div>
@@ -150,41 +148,44 @@
         <div id="counter-value" class="value">—</div>
 
         <div class="controls">
-            <button class="btn-dec" onclick="Module.ccall('decrement', null, [], [])">−</button>
-            <button class="btn-reset" onclick="Module.ccall('reset_counter', null, [], [])">Reset</button>
-            <button class="btn-inc" onclick="Module.ccall('increment', null, [], [])">+</button>
+            <button class="btn-dec"   onclick="Module._decrement()">−</button>
+            <button class="btn-reset" onclick="Module._reset_counter()">Reset</button>
+            <button class="btn-inc"   onclick="Module._increment()">+</button>
         </div>
 
         <div id="status" class="status"></div>
 
-        <button class="btn-signout"
-                onclick="Module.ccall('auth_logout',null,[],[])">Sign Out</button>
+        <button class="btn-signout" onclick="authLogout()">Sign Out</button>
     </div>
 
     <script>
+        /* Define Module before counter.js loads so onRuntimeInitialized is
+         * honoured.  auth.js is already loaded above so authIsLoggedIn() is
+         * available here. */
         var Module = {
-            onRuntimeInitialized: function() {
-                if (Module.ccall('auth_is_logged_in', 'number', [], []) === 1) {
-                    Module.showCounterPanel('');
+            onRuntimeInitialized: function () {
+                if (authIsLoggedIn()) {
+                    Module.showCounterPanel("");
                 } else {
-                    document.getElementById('auth-panel').style.display = 'block';
+                    document.getElementById("auth-panel").style.display = "block";
                 }
             },
-            showAuthPanel: function() {
-                document.getElementById('counter-panel').style.display = 'none';
-                document.getElementById('auth-panel').style.display   = 'block';
-                document.getElementById('auth-status').textContent    = '';
+            showAuthPanel: function () {
+                document.getElementById("counter-panel").style.display = "none";
+                document.getElementById("auth-panel").style.display   = "block";
+                document.getElementById("auth-status").textContent    = "";
             },
-            showCounterPanel: function(username) {
-                document.getElementById('auth-panel').style.display    = 'none';
-                document.getElementById('counter-panel').style.display = 'block';
+            showCounterPanel: function (username) {
+                document.getElementById("auth-panel").style.display    = "none";
+                document.getElementById("counter-panel").style.display = "block";
                 if (username) {
-                    document.getElementById('current-user').textContent = username;
+                    document.getElementById("current-user").textContent = username;
                 }
-                Module.ccall('refresh', null, [], []);
+                Module._refresh();
             }
         };
     </script>
+    <script src="auth.js"></script>
     <script src="counter.js"></script>
 </body>
 </html>
