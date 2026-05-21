@@ -8,10 +8,10 @@
 
 static void on_success(emscripten_fetch_t *fetch) {
     if (fetch->status == 401) {
-        /* Session expired or revoked server-side. The HttpOnly cookie will be
-         * cleared by the server on the next /auth/logout call. Return to the
-         * auth panel so the user can log in again. */
-        EM_ASM({ Module.showAuthPanel(); });
+        /* Session expired or revoked server-side. Dispatch a DOM event so the
+         * app can return to the auth panel without coupling C to any specific
+         * auth UI object. */
+        EM_ASM({ document.dispatchEvent(new CustomEvent('auth:session-expired')); });
         emscripten_fetch_close(fetch);
         return;
     }

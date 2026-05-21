@@ -14,6 +14,70 @@ session-guarded with per-user counters keyed by username binary. The TCP server
 
 ---
 
+## Auth Layer / Counter App Separation
+
+The auth layer is decoupled from the counter example and can be reused for new
+projects without modification.
+
+### Auth layer (reusable — copy verbatim)
+| File | Notes |
+|------|-------|
+| `erlang/auth.erl` | Gen_server, 4 Mnesia tables |
+| `erlang/auth_http.erl` | WebAuthn handlers + `route/4` (see below) |
+| `erlang/webauthn.erl` | Registration/assertion verification |
+| `erlang/webauthn_cbor.erl` | Pure CBOR decoder |
+| `frontend/auth.js` | WebAuthn ceremonies; dispatches DOM events |
+
+**Configuration points** (change these two lines per deployment):
+- `erlang/webauthn.erl`: `-define(?ORIGIN, ...)` and `-define(?RP_ID, ...)`
+- `erlang/auth_http.erl`: `-define(?RP_NAME, ...)`
+
+### Counter app (example — shows how to wire auth)
+| File | Notes |
+|------|-------|
+| `erlang/app_http.erl` | HTTP server + counter routing |
+| `erlang/counter.erl` | Counter business logic |
+| `erlang/counter_server.erl` | TCP interface (no auth) |
+| `frontend/index.html` | Listens for auth events, drives panels |
+| `c/counter_wasm.c` | WASM counter; dispatches `auth:session-expired` on 401 |
+
+### How `auth_http:route/4` works
+
+`auth_http:route/4` handles every `/auth/*` path and returns `not_auth_route` for
+anything else. An app HTTP module plugs it in at the top of its own router:
+
+```erlang
+route(Method, Path, Body, Token) ->
+    case auth_http:route(Method, Path, Body, Token) of
+        not_auth_route     -> my_app_route(Method, Path, Body, Token);
+        {Code, Hdrs, Resp} -> response(Code, "application/json", Hdrs, Resp)
+    end.
+```
+
+Routes handled: `POST /auth/register/begin`, `POST /auth/register/complete`,
+`POST /auth/login/begin`, `POST /auth/login/complete`, `POST /auth/logout`,
+`GET /auth/me`.
+
+### How `auth.js` communicates with the app
+
+`auth.js` dispatches DOM events on `document` instead of calling app-specific
+functions. A new project only needs to listen for two events:
+
+```javascript
+document.addEventListener('auth:login', function(e) {
+    // e.detail.username is available
+    // show your app's main UI
+});
+document.addEventListener('auth:logout', function() {
+    // show auth panel
+});
+```
+
+`counter_wasm.c` dispatches `auth:session-expired` (same handler as `auth:logout`)
+when the server returns 401.
+
+---
+
 ## Schema-Driven Code Generation
 
 New tooling generates Erlang modules and JavaScript form helpers from a single
@@ -71,9 +135,15 @@ decode_item(<<IB:8, Rest/binary>>) ->
 ### `erlang/webauthn.erl`
 Registration and assertion verification. Depends on `webauthn_cbor`, `crypto`, `json`, `base64`.
 
+**Configuration** (top of file — change for new deployments):
+```erlang
+-define(ORIGIN, <<"http://localhost:8080">>).
+-define(RP_ID,  <<"localhost">>).
+```
+
 **`verify_registration(Username, ChallengeB64, AttObjB64, ClientDataB64)`**
 1. base64url-decode and `json:decode` clientDataJSON; check `type="webauthn.create"`,
-   challenge matches (bytes comparison after decoding both sides), `origin="http://localhost:8080"`
+   challenge matches (bytes comparison after decoding both sides), `origin=?ORIGIN`
 2. base64url-decode attestationObject; `webauthn_cbor:decode`; extract `authData` bytes
 3. Parse authData binary:
    ```erlang
@@ -81,7 +151,7 @@ Registration and assertion verification. Depends on `webauthn_cbor`, `crypto`, `
      _AAGUID:16/binary, CredIdLen:16,
      CredId:CredIdLen/binary, CoseBytes/binary>> = AuthData
    ```
-4. Verify `RpIdHash =:= crypto:hash(sha256, <<"localhost">>)`
+4. Verify `RpIdHash =:= crypto:hash(sha256, ?RP_ID)`
 5. Verify UP flag `(Flags band 1) =:= 1`
 6. `webauthn_cbor:decode(CoseBytes)` → `extract_ec_pubkey(#{-2 := X, -3 := Y})`
 7. Public key = `<<16#04, X:32/binary, Y:32/binary>>`
@@ -133,9 +203,17 @@ Hourly purge: `erlang:send_after(3_600_000, self(), purge_sessions)` in `init/1`
 Each handler returns `{HttpCode, ExtraHeaders, JsonBinary}`. `ExtraHeaders` is `[]` or
 contains `{<<"Set-Cookie">>, Value}` tuples assembled by `set_cookie/1` and `clear_cookie/0`.
 
-- `handle_register_begin(Body)` → check user absent; generate random 16-byte `userId`
-  (not the username — PII must not go in `user.id` per the WebAuthn spec, as it may be
-  stored on the authenticator); `auth:create_challenge`; return `{challenge, userId, rpId, rpName}`
+**Configuration:**
+```erlang
+-define(RP_NAME, <<"My App">>).
+```
+
+**`route/4`** — generic auth router; returns `{Code, ExtraHeaders, Body}` for auth
+routes, `not_auth_route` otherwise. Handles: register begin/complete, login begin/complete,
+logout, `/auth/me`.
+
+- `handle_register_begin(Body)` → check user absent; generate random 16-byte `userId`;
+  `auth:create_challenge`; return `{challenge, userId, rpId, rpName}`
 - `handle_register_complete(Body)` → `auth:consume_challenge`; `webauthn:verify_registration/4`;
   `auth:register_credential`; `auth:create_session`; return `{201, [set_cookie(Token)], {status, username}}`
 - `handle_login_begin(Body)` → `auth:credentials_for_user`; `auth:create_challenge`; return `{challenge, rpId, allowCredentials}`
@@ -173,21 +251,17 @@ Mnesia record key is the User parameter (binary username from HTTP, atom `defaul
 ### `erlang/counter_server.erl`
 TCP server passes atom `default` as the user key. Keeps all 12 existing C tests passing.
 
-### `erlang/counter_http.erl`
+### `erlang/app_http.erl`
+Example application HTTP server. Demonstrates how to wire auth into an app:
 - `start/0`: starts `counter`, `auth`, and `user_address`
-- `collect_headers/2`: accumulates `Content-Length` and `Cookie` (replaces old `Authorization` parsing)
+- `collect_headers/2`: accumulates `Content-Length` and `Cookie`
 - `parse_session_cookie/1`: splits Cookie header on `"; "`, extracts `session=` value
-- `route/4(Method, Path, Body, Token)`: auth routes → counter routes → static files (order matters)
-- `GET /auth/me`: lightweight session check — returns `{username}` or 401; used by frontend on page load
+- `route/4`: delegates to `auth_http:route/4` first, then `app_route/4`
+- `app_route/4`: user address routes, counter routes, static files
 - `session_guard/4`: validates session → passes Username to `counter_route/4`
-- `response/3` wraps `response/4` with `[]`; `response/4` includes `ExtraHeaders` between CORS and Content-Length
-- `route/4`: user address routes `GET /user_address`, `POST /user_address`
-  dispatched to `session_guard_state/4` — placed before counter routes
 - `session_guard_state(get | put, Mod, Body, Token)`: generic session-guarded
-  handler; calls `Mod:get(User)` or `Mod:put(User, json:decode(Body))`; designed
-  to work with any module that exports `get/1` and `put/2`
-- `cors_headers/0`: `Content-Type` only (no `Authorization` — cookies are not a CORS credential)
-- `status_line/1`: covers 200, 201, 400, 401, 404, 409, 500
+  handler; calls `Mod:get(User)` or `Mod:put(User, json:decode(Body))`
+- `cors_headers/0`, `response/3`, `response/4`, `status_line/1`: transport helpers
 
 ---
 
@@ -196,7 +270,8 @@ TCP server passes atom `default` as the user key. Keeps all 12 existing C tests 
 ### `c/counter_wasm.c`
 No auth logic. `do_fetch` sets up `emscripten_fetch_attr_t` and fires the request; the browser
 sends the `HttpOnly` session cookie automatically for same-origin requests. On HTTP 401,
-`EM_ASM({ Module.showAuthPanel(); })` redirects to the auth panel.
+dispatches `document.dispatchEvent(new CustomEvent('auth:session-expired'))` — no direct
+reference to any auth UI object.
 
 No Asyncify, no EM_JS bridge, no Authorization header.
 
@@ -207,32 +282,19 @@ No Asyncify, no EM_JS bridge, no Authorization header.
 ### `frontend/auth.js`
 ```javascript
 const _API = 'http://localhost:8080';
-
-// base64url encode: loop, not spread, to avoid call-stack overflow on large buffers
-function _b64url(buf) { ... }
-function _b64url_decode(s) { ... }
-
-// Parse error body defensively — falls back to status code if response is not JSON
-async function _err_msg(resp) { ... }
-
-// Check browser support before calling navigator.credentials
-function _webauthn_available() {
-    return !!(window.PublicKeyCredential && navigator.credentials);
-}
-
-// Called from Module.onRuntimeInitialized — restores login state from HttpOnly cookie
-async function authCheckSession() { /* GET /auth/me → showCounterPanel if 200 */ }
-
-async function authRegister() { /* begin → credentials.create → complete */ }
-async function authLogin()    { /* begin → credentials.get   → complete */ }
-async function authLogout()   { /* POST /auth/logout, showAuthPanel */ }
 ```
+
+Dispatches `CustomEvent` on `document` instead of calling app-specific functions:
+- `auth:login` (detail: `{username}`) — after successful register, login, or valid session
+- `auth:logout` — after logout
+
+Public functions (`authCheckSession`, `authRegister`, `authLogin`, `authLogout`) are
+unchanged. A new project listens for these two events and drives its own UI.
 
 Key points:
 - No `window.__sessionToken` — session is in an HttpOnly cookie, invisible to JS
 - `authRegister` uses `opts.userId` (random server-generated bytes) for `user.id`, not the username
-- All error paths wrap `resp.json()` in try/catch; non-JSON responses (e.g. 502 HTML) are handled gracefully
-- `authLogout` is fire-and-forget; navigates back to auth panel immediately
+- All error paths wrap `resp.json()` in try/catch; non-JSON responses are handled gracefully
 
 ### `frontend/user_address_form.js`
 Generated by `gen_schema.escript` — do not edit by hand.
@@ -249,11 +311,9 @@ Generated by `gen_schema.escript` — do not edit by hand.
 - `Module.onRuntimeInitialized`: shows auth panel, then calls `authCheckSession()` (async)
 - Buttons: `onclick="authRegister()"`, `onclick="authLogin()"`, `onclick="authLogout()"`
 - Counter buttons: `onclick="Module._increment()"` etc.
-- Address panel: `#user_address-panel` card shown alongside the counter panel;
-  Save button calls `saveUserAddress()`; status shown in `#user_address-status`
-- `showCounterPanel` now also shows `#user_address-panel`, calls
-  `buildUserAddressForm()` and `loadUserAddress()`
-- `showAuthPanel` hides `#user_address-panel` (in addition to counter panel)
+- Listens for `auth:login` → shows counter + address panels, calls `Module._refresh()`,
+  `buildUserAddressForm()`, `loadUserAddress()`
+- Listens for `auth:logout` and `auth:session-expired` → shows auth panel
 - Load order: `auth.js` → `user_address_form.js` → `counter.js`
 
 ---
@@ -291,7 +351,8 @@ in the `BEAMS` list so `make all` compiles it.
 | Created | `erlang/webauthn_cbor.erl` |
 | Created | `erlang/webauthn.erl` |
 | Created | `erlang/auth.erl` |
-| Created | `erlang/auth_http.erl` |
+| Created | `erlang/auth_http.erl` (includes `route/4`) |
+| Created | `erlang/app_http.erl` (example app HTTP server) |
 | Created | `erlang/gen_schema.escript` (code generator) |
 | Created | `erlang/user_address.erl` (generated from schema) |
 | Created | `schema/address.yaml` |
@@ -299,18 +360,18 @@ in the `BEAMS` list so `make all` compiles it.
 | Created | `frontend/user_address_form.js` (generated from schema) |
 | Modified | `erlang/counter.erl` (per-user API) |
 | Modified | `erlang/counter_server.erl` (uses `default` key) |
-| Modified | `erlang/counter_http.erl` (session guard, Cookie parsing, /auth/me, /user_address, session_guard_state) |
-| Modified | `c/counter_wasm.c` (no auth header; 401 → showAuthPanel) |
-| Modified | `frontend/index.html` (async session check, address panel) |
-| Modified | `Makefile` (no Asyncify, copies auth.js + user_address_form.js, gen target) |
+| Modified | `c/counter_wasm.c` (CustomEvent on 401, no auth UI reference) |
+| Modified | `frontend/index.html` (auth event listeners, no Module.show* methods) |
+| Modified | `Makefile` (app_http replaces counter_http) |
 | Deleted | `c/auth_wasm.c` (replaced by auth.js) |
 | Deleted | `frontend/QA.md` |
+| Deleted | `erlang/counter_http.erl` (replaced by app_http.erl) |
 
 ---
 
 ## Verification
 
-1. `make all` — all 7 beams compile cleanly
+1. `make all` — all 8 beams compile cleanly (app_http replaces counter_http)
 2. `make test` — all 12 C tests pass (TCP server, `default` counter key, no auth)
 3. `make wasm` — WASM builds without warnings
 4. `make serve` — server starts on port 8080

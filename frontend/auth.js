@@ -60,7 +60,7 @@ async function authCheckSession() {
         const r = await fetch(_API + '/auth/me');
         if (r.ok) {
             const data = await r.json();
-            Module.showCounterPanel(data.username);
+            document.dispatchEvent(new CustomEvent('auth:login', {detail: {username: data.username}}));
         }
         /* 401 or network error → stay on auth panel */
     } catch (_) {}
@@ -129,7 +129,7 @@ async function authRegister() {
         });
         if (r2.ok) {
             const data = await r2.json();
-            Module.showCounterPanel(data.username);
+            document.dispatchEvent(new CustomEvent('auth:login', {detail: {username: data.username}}));
         } else {
             if (statusEl) statusEl.textContent = 'Registration failed: ' + (await _err_msg(r2));
         }
@@ -195,7 +195,7 @@ async function authLogin() {
         });
         if (r2.ok) {
             const data = await r2.json();
-            Module.showCounterPanel(data.username);
+            document.dispatchEvent(new CustomEvent('auth:login', {detail: {username: data.username}}));
         } else {
             if (statusEl) statusEl.textContent = 'Login failed: ' + (await _err_msg(r2));
         }
@@ -215,5 +215,5 @@ async function authLogout() {
     try {
         await fetch(_API + '/auth/logout', {method: 'POST'});
     } catch (_) {}
-    Module.showAuthPanel();
+    document.dispatchEvent(new CustomEvent('auth:logout'));
 }

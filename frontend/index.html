@@ -171,35 +171,41 @@
     </div>
 
     <script>
-        /* Define Module before counter.js loads so onRuntimeInitialized is
-         * honoured.  auth.js is already loaded above so authIsLoggedIn() is
-         * available here. */
+        /* Define Module before counter.js loads so onRuntimeInitialized is honoured. */
         var Module = {
             onRuntimeInitialized: function () {
                 /* Show the auth panel first, then check asynchronously whether
-                 * the browser holds a valid session cookie.  If it does,
-                 * authCheckSession() will switch to the counter panel. */
+                 * the browser holds a valid session cookie.  authCheckSession()
+                 * will dispatch auth:login if a valid session exists. */
                 document.getElementById("auth-panel").style.display = "block";
                 authCheckSession();
-            },
-            showAuthPanel: function () {
-                document.getElementById("counter-panel").style.display     = "none";
-                document.getElementById("user_address-panel").style.display = "none";
-                document.getElementById("auth-panel").style.display        = "block";
-                document.getElementById("auth-status").textContent         = "";
-            },
-            showCounterPanel: function (username) {
-                document.getElementById("auth-panel").style.display         = "none";
-                document.getElementById("counter-panel").style.display      = "block";
-                document.getElementById("user_address-panel").style.display = "block";
-                if (username) {
-                    document.getElementById("current-user").textContent = username;
-                }
-                Module._refresh();
-                buildUserAddressForm();
-                loadUserAddress();
             }
         };
+
+        /* auth:login — dispatched by auth.js after successful register, login,
+         * or a valid session found on page load. */
+        document.addEventListener('auth:login', function (e) {
+            document.getElementById("auth-panel").style.display         = "none";
+            document.getElementById("counter-panel").style.display      = "block";
+            document.getElementById("user_address-panel").style.display = "block";
+            if (e.detail && e.detail.username) {
+                document.getElementById("current-user").textContent = e.detail.username;
+            }
+            Module._refresh();
+            buildUserAddressForm();
+            loadUserAddress();
+        });
+
+        /* auth:logout and auth:session-expired — dispatched by auth.js on logout,
+         * and by counter.js (via counter_wasm.c) when the server returns 401. */
+        function _showAuthPanel() {
+            document.getElementById("counter-panel").style.display      = "none";
+            document.getElementById("user_address-panel").style.display = "none";
+            document.getElementById("auth-panel").style.display         = "block";
+            document.getElementById("auth-status").textContent          = "";
+        }
+        document.addEventListener('auth:logout',          _showAuthPanel);
+        document.addEventListener('auth:session-expired', _showAuthPanel);
     </script>
     <script src="auth.js"></script>
     <script src="user_address_form.js"></script>

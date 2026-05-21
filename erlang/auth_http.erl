@@ -2,18 +2,24 @@
 %% authentication) plus session check and logout. Each function receives the raw
 %% request body binary and returns {HttpStatusCode, ExtraHeaders, JsonBody}.
 %%
-%% counter_http.erl routes /auth/* requests here and wraps the result in an
-%% HTTP response. Auth routes are deliberately unauthenticated — you need to
+%% route/4 matches all /auth/* paths and returns not_auth_route for anything
+%% else, so any app HTTP module can delegate to it without knowing the auth URL
+%% structure. Auth routes are deliberately unauthenticated — you need to
 %% register or log in before you have a session.
 %%
 %% Sessions are maintained via an HttpOnly cookie named "session". HttpOnly means
 %% the value is invisible to JavaScript (no XSS exfiltration), and SameSite=Strict
-%% prevents cross-site request forgery. The WASM counter code does not need to
-%% attach any Authorization header — the browser sends the cookie automatically.
+%% prevents cross-site request forgery. The browser sends the cookie automatically
+%% with every same-origin request — no Authorization header needed.
 -module(auth_http).
 -export([handle_register_begin/1, handle_register_complete/1,
          handle_login_begin/1,    handle_login_complete/1,
-         handle_logout/1]).
+         handle_logout/1,
+         route/4]).
+
+%% Relying Party name shown in the browser's passkey dialog.
+%% Change this one line when reusing this module in a new project.
+-define(RP_NAME, <<"My App">>).
 
 %% ---------------------------------------------------------------------------
 %% Registration — step 1
@@ -40,7 +46,7 @@ handle_register_begin(Body) ->
                     <<"challenge">> => ChallengeB64,
                     <<"userId">>    => UserId,
                     <<"rpId">>      => <<"localhost">>,   %% must match ?RP_ID in webauthn.erl
-                    <<"rpName">>    => <<"Counter App">>
+                    <<"rpName">>    => ?RP_NAME
                 })}
         end
     catch _:_ -> {400, [], json_err(<<"bad_request">>)}
@@ -187,6 +193,33 @@ handle_login_complete(Body) ->
 handle_logout(Token) ->
     ok = auth:delete_session(Token),
     {200, [clear_cookie()], json:encode(#{<<"status">> => <<"ok">>})}.
+
+%% ---------------------------------------------------------------------------
+%% Generic auth router
+%%
+%% Matches every /auth/* path and /auth/me. Returns {Code, ExtraHeaders, Body}
+%% for auth routes (same tuple as the individual handlers above), or the atom
+%% not_auth_route for any path that belongs to the calling application.
+%%
+%% Usage in an app HTTP module:
+%%
+%%   route(Method, Path, Body, Token) ->
+%%       case auth_http:route(Method, Path, Body, Token) of
+%%           not_auth_route     -> my_app_route(Method, Path, Body, Token);
+%%           {Code, Hdrs, Resp} -> response(Code, "application/json", Hdrs, Resp)
+%%       end.
+%% ---------------------------------------------------------------------------
+route('POST', <<"/auth/register/begin">>,    Body, _)    -> handle_register_begin(Body);
+route('POST', <<"/auth/register/complete">>, Body, _)    -> handle_register_complete(Body);
+route('POST', <<"/auth/login/begin">>,       Body, _)    -> handle_login_begin(Body);
+route('POST', <<"/auth/login/complete">>,    Body, _)    -> handle_login_complete(Body);
+route('POST', <<"/auth/logout">>,            _,    Token) -> handle_logout(Token);
+route('GET',  <<"/auth/me">>,                _,    Token) ->
+    case auth:validate_session(Token) of
+        {ok, U}    -> {200, [], json:encode(#{<<"username">> => U})};
+        {error, _} -> {401, [], json:encode(#{<<"error">> => <<"Unauthorized">>})}
+    end;
+route(_, _, _, _) -> not_auth_route.
 
 %% ---------------------------------------------------------------------------
 %% Cookie helpers

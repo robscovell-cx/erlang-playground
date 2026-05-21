@@ -17,7 +17,7 @@ GEN_ESCRIPT = $(ERLDIR)/gen_schema.escript
 SCHEMA_DIR  = schema
 
 C_BINS = $(BUILD)/counter_client $(BUILD)/counter_tests
-BEAMS  = $(BUILD)/counter.beam $(BUILD)/counter_server.beam $(BUILD)/counter_http.beam \
+BEAMS  = $(BUILD)/counter.beam $(BUILD)/counter_server.beam $(BUILD)/app_http.beam \
          $(BUILD)/auth.beam $(BUILD)/auth_http.beam \
          $(BUILD)/webauthn.beam $(BUILD)/webauthn_cbor.beam \
          $(BUILD)/user_address.beam
@@ -58,7 +58,7 @@ wasm: $(FRONTEND_BUILD)
 ## Start the Erlang HTTP server. It serves the API and the frontend from build/frontend/.
 serve: all wasm
 	@lsof -ti:$(HTTP_PORT) | xargs kill -9 2>/dev/null; true
-	erl -noshell -pa $(BUILD) -s counter_http start
+	erl -noshell -pa $(BUILD) -s app_http start
 
 test: all
 	@lsof -ti:$(COUNTER_PORT) | xargs kill -9 2>/dev/null; true

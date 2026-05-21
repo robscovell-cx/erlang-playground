@@ -15,8 +15,10 @@
 -module(webauthn).
 -export([verify_registration/4, verify_assertion/5]).
 
-%% These must match what the browser sees. The origin is scheme+host+port;
-%% the RP ID is just the host (or a registrable domain suffix of it).
+%% Deployment configuration — change these two lines for a new project.
+%% ORIGIN is scheme+host+port as the browser sees it.
+%% RP_ID  is just the host (or a registrable domain suffix of it).
+%% Both must also be updated in auth_http.erl (the rpId sent to the browser).
 -define(ORIGIN, <<"http://localhost:8080">>).
 -define(RP_ID,  <<"localhost">>).
 
